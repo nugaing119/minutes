@@ -1,0 +1,30 @@
+.env
+.env.*
+!.env.example
+.venv/
+.omx/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Local meeting artifacts. Defaults write to ~/minutes, but keep repo-local
+# experiments out of Git if someone overrides MINUTES_HOME into the repo.
+jobs/
+output/
+recordings/
+work/
+frames/
+snapshots/
+*.mov
+*.mp4
+*.mkv
+*.wav
+*.srt
+*.docx
+
+# Credentials and local config
+*.pem
+*.key
+*.p12
+*.crt
+.oci/
