@@ -9,7 +9,9 @@
 - Apple Silicon Mac 권장
 - Homebrew
 - Python 3.11 이상 권장
-- OpenAI API 또는 OCI GenAI API 중 하나
+- Codex, OpenAI API, OCI GenAI API 중 하나
+
+Codex Skill 방식으로 실행하려면 Codex가 설치되어 있고 로그인되어 있어야 한다. OpenAI API나 OCI GenAI API를 직접 provider로 사용할 경우에는 해당 API 인증 정보가 필요하다.
 
 ## 2. 설치
 
