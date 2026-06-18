@@ -1,6 +1,6 @@
 # minutes 설치 및 사용 가이드
 
-`minutes`는 OBS/Zoom 녹화 파일을 Mac에서 로컬로 전사하고, OCR 텍스트와 함께 LLM으로 한국어 회의록을 생성하는 도구다.
+`minutes`는 회의, 강의, 웨비나 등 녹화 영상 파일을 Mac에서 로컬로 전사하고, OCR 텍스트와 함께 LLM으로 한국어 회의록을 생성하는 도구다.
 
 기본 입력 폴더는 `~/remind`, 기본 작업/결과 폴더는 `~/minutes`다. repository를 어디에 clone해도 이 홈 디렉터리 기준 경로를 사용하므로 다른 사용자도 별도 경로 수정 없이 시작할 수 있다.
 
@@ -88,7 +88,7 @@ python scripts/init_dirs.py
   output/
 ```
 
-OBS 녹화 저장 폴더는 `~/remind`로 맞추면 자동 감시 기능과 잘 맞는다. 수동 실행은 다른 폴더의 영상도 처리할 수 있다.
+자동 처리할 영상 저장 폴더는 `~/remind`로 맞추면 감시 기능과 잘 맞는다. 수동 실행은 다른 폴더의 영상도 처리할 수 있다.
 
 ## 5. 파일 하나 처리
 
@@ -114,7 +114,7 @@ python scripts/process_file.py "/Users/jun/Desktop/고객 미팅.mov"
 
 ## 6. 자동 감시 실행
 
-OBS 녹화가 `~/remind`에 저장되도록 설정한 뒤 watcher를 실행한다.
+처리할 영상이 `~/remind`에 저장되도록 설정한 뒤 watcher를 실행한다.
 
 ```bash
 python scripts/watch_recordings.py
