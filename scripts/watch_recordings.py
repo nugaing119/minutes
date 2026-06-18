@@ -12,9 +12,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from scripts.config import load_settings
-
-
-SUPPORTED_EXTENSIONS = {".mp4", ".mkv", ".mov"}
+from scripts.media_types import SUPPORTED_EXTENSIONS
 
 
 class RecordingHandler(FileSystemEventHandler):

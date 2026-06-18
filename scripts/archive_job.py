@@ -9,6 +9,7 @@ if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from scripts.config import load_settings
+from scripts.media_types import is_video_extension
 from scripts.utils import now_local, safe_filename, unique_path, write_json
 
 
@@ -28,7 +29,7 @@ def archive_job(job_dir: Path, title: str | None = None) -> Path:
     output_dir = make_meeting_output_dir(settings.output_dir, saved_date, safe_title)
 
     final_stem = f"{saved_date}_{output_dir.name}"
-    video_out = copy_required(source, output_dir / f"{final_stem}{source.suffix.lower()}")
+    source_out = copy_required(source, output_dir / f"{final_stem}{source.suffix.lower()}")
 
     files = {
         "minutes": copy_required(minutes_path, output_dir / f"{final_stem}.md"),
@@ -73,6 +74,12 @@ def archive_job(job_dir: Path, title: str | None = None) -> Path:
     if settings.cleanup_job_ocr_images_after_archive:
         cleaned_job_ocr_images = cleanup_job_ocr_images(job_dir)
 
+    files_payload = {"source": str(source_out), **{k: str(v) for k, v in files.items()}}
+    if is_video_extension(source.suffix):
+        files_payload["video"] = str(source_out)
+    else:
+        files_payload["audio"] = str(source_out)
+
     status = {
         "status": "completed",
         "step": "completed",
@@ -83,7 +90,7 @@ def archive_job(job_dir: Path, title: str | None = None) -> Path:
         "date_output_dir": str(output_dir.parent),
         "base_name": final_stem,
         "cleaned_job_ocr_images": cleaned_job_ocr_images,
-        "files": {"video": str(video_out), **{k: str(v) for k, v in files.items()}},
+        "files": files_payload,
     }
     write_json(job_dir / "status.json", status)
     print(f"saved: {output_dir}")

@@ -19,6 +19,11 @@ snapshots/
 *.mp4
 *.mkv
 *.wav
+*.m4a
+*.mp3
+*.aac
+*.flac
+*.ogg
 *.srt
 *.docx
 

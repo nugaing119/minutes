@@ -10,6 +10,11 @@ if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from scripts.config import load_settings
+from scripts.media_types import (
+    SUPPORTED_EXTENSIONS,
+    is_video_extension,
+    supported_extensions_text,
+)
 from scripts.summarize import generate_minutes, render_markdown
 from scripts.utils import (
     file_fingerprint,
@@ -21,16 +26,17 @@ from scripts.utils import (
 )
 
 
-SUPPORTED_EXTENSIONS = {".mp4", ".mkv", ".mov"}
-
-
-def process_file(video_path: Path) -> Path:
+def process_file(media_path: Path) -> Path:
     settings = load_settings()
-    source = video_path.expanduser().resolve()
+    source = media_path.expanduser().resolve()
     if not source.exists():
         raise FileNotFoundError(source)
     if source.suffix.lower() not in SUPPORTED_EXTENSIONS:
-        raise ValueError(f"Unsupported file extension: {source.suffix}")
+        raise ValueError(
+            f"Unsupported file extension: {source.suffix}. "
+            f"Supported: {supported_extensions_text()}",
+        )
+    has_video = is_video_extension(source.suffix)
 
     settings.recordings_inbox.mkdir(parents=True, exist_ok=True)
     settings.jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -88,24 +94,36 @@ def process_file(video_path: Path) -> Path:
         screen_text = ""
         screen_text_json_path = job_dir / "screen_text.json"
         screen_text_txt_path = job_dir / "screen_text.txt"
-        try:
-            from scripts.ocr import run_ocr
+        if has_video:
+            try:
+                from scripts.ocr import run_ocr
 
-            run_ocr(job_source, job_dir, settings)
-            if screen_text_txt_path.exists():
-                screen_text = screen_text_txt_path.read_text(encoding="utf-8")
-        except Exception as ocr_error:
+                run_ocr(job_source, job_dir, settings)
+                if screen_text_txt_path.exists():
+                    screen_text = screen_text_txt_path.read_text(encoding="utf-8")
+            except Exception as ocr_error:
+                write_json(
+                    screen_text_json_path,
+                    {
+                        "enabled": settings.ocr_enabled,
+                        "status": "failed",
+                        "error": str(ocr_error),
+                        "frames": [],
+                    },
+                )
+                screen_text_txt_path.write_text("", encoding="utf-8")
+                screen_text = ""
+        else:
             write_json(
                 screen_text_json_path,
                 {
                     "enabled": settings.ocr_enabled,
-                    "status": "failed",
-                    "error": str(ocr_error),
+                    "status": "skipped",
+                    "reason": "audio input has no video frames",
                     "frames": [],
                 },
             )
             screen_text_txt_path.write_text("", encoding="utf-8")
-            screen_text = ""
 
         if settings.llm_provider == "codex":
             status("awaiting_codex", state="awaiting_codex")
@@ -141,7 +159,7 @@ def process_file(video_path: Path) -> Path:
 
         output_dir = make_meeting_output_dir(settings.output_dir, saved_date, title)
         final_stem = f"{saved_date}_{output_dir.name}"
-        video_out = copy_required(source, output_dir / f"{final_stem}{source.suffix.lower()}")
+        source_out = copy_required(source, output_dir / f"{final_stem}{source.suffix.lower()}")
         final_md = output_dir / f"{final_stem}.md"
         final_txt = output_dir / f"{final_stem}.transcript.txt"
         final_json = output_dir / f"{final_stem}.transcript.json"
@@ -176,7 +194,7 @@ def process_file(video_path: Path) -> Path:
 
         completed_at = now_local().isoformat()
         files = {
-            "video": str(video_out),
+            "source": str(source_out),
             "minutes": str(final_md),
             "transcript_txt": str(final_txt),
             "transcript_json": str(final_json),
@@ -188,6 +206,10 @@ def process_file(video_path: Path) -> Path:
             files["docx"] = str(final_docx)
         if snapshots_out is not None:
             files["snapshots"] = str(snapshots_out)
+        if has_video:
+            files["video"] = str(source_out)
+        else:
+            files["audio"] = str(source_out)
 
         status(
             "completed",
@@ -227,10 +249,13 @@ def process_file(video_path: Path) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Process one meeting recording.")
-    parser.add_argument("video_path", help="Path to .mp4, .mkv, or .mov file")
+    parser.add_argument(
+        "media_path",
+        help=f"Path to a supported media file: {supported_extensions_text()}",
+    )
     args = parser.parse_args()
     try:
-        process_file(Path(args.video_path))
+        process_file(Path(args.media_path))
     except Exception as exc:
         raise SystemExit(f"error: {exc}") from exc
 

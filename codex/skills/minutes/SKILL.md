@@ -1,21 +1,21 @@
 ---
 name: minutes
-description: "Use when processing local video recordings into Korean meeting minutes with the minutes repo: run ffmpeg, mlx-whisper STT, optional OCR, Codex fallback minutes generation, archive Markdown and DOCX outputs under ~/minutes/output, and verify generated artifacts."
+description: "Use when processing local video or audio recordings into Korean meeting minutes with the minutes repo: run ffmpeg, mlx-whisper STT, optional video OCR, Codex fallback minutes generation, archive Markdown and DOCX outputs under ~/minutes/output, and verify generated artifacts."
 ---
 
 # minutes
 
-Use this skill when the user wants to process a local video file into Korean meeting minutes using this repository.
+Use this skill when the user wants to process a local video or audio file into Korean meeting minutes using this repository.
 
 ## Core Contract
 
 - Default input folder: `~/remind`.
 - Default work/output root: `~/minutes`.
-- Supported input extensions: `.mp4`, `.mkv`, `.mov`.
+- Supported input extensions: `.mp4`, `.mkv`, `.mov`, `.m4a`, `.mp3`, `.wav`, `.aac`, `.flac`, `.ogg`.
 - Final minutes must be Korean. Keep English only for product names, API names, commands, and unavoidable proper nouns.
 - Final outputs go under `~/minutes/output/YYYY-MM-DD/<meeting-title>/`.
 - Keep raw job artifacts under `~/minutes/jobs/<job_id>/`.
-- Do not send audio, video, transcript, or OCR content outside the machine except to the configured LLM provider requested by the user.
+- Do not send source media, transcript, or OCR content outside the machine except to the configured LLM provider requested by the user.
 
 ## Standard Commands
 
@@ -29,6 +29,7 @@ Process a specific recording with configured OpenAI or OCI provider:
 
 ```bash
 python scripts/process_file.py "/Users/<user>/remind/<recording>.mov"
+python scripts/process_file.py "/Users/<user>/remind/<recording>.m4a"
 ```
 
 Run Codex mode when the user wants Codex to write the final Korean minutes:
@@ -49,6 +50,7 @@ When invoked as a Codex skill, accept prompts like:
 
 ```text
 $minutes Codex 모드로 "/Users/jun/remind/2026-06-18 회의.mov" 내용 정리해줘
+$minutes Codex 모드로 "/Users/jun/remind/2026-06-18 회의.m4a" 내용 정리해줘
 $minutes "/Users/jun/Desktop/customer-call.mov" 회의록 만들어줘
 $minutes "/Users/jun/remind/demo.mp4" CPU와 소요시간도 측정해줘
 ```
@@ -60,7 +62,7 @@ For Codex mode, run the scripts, read the generated `codex_minutes_input.md`, cr
 ```text
 ~/minutes/output/YYYY-MM-DD/
   회의-주제/
-    YYYY-MM-DD_회의-주제.mov
+    YYYY-MM-DD_회의-주제.mov 또는 YYYY-MM-DD_회의-주제.m4a
     YYYY-MM-DD_회의-주제.md
     YYYY-MM-DD_회의-주제.docx
     YYYY-MM-DD_회의-주제.transcript.txt
@@ -80,4 +82,4 @@ Before claiming completion:
 python -m py_compile scripts/*.py
 ```
 
-For generated output, verify that the final folder contains the source video copy, `.md`, `.docx`, transcript files, OCR text files when available, and `snapshots/` when OCR produced meaningful images.
+For generated output, verify that the final folder contains the source media copy, `.md`, `.docx`, transcript files, OCR text files when available, and `snapshots/` when video OCR produced meaningful images.
