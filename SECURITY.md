@@ -30,6 +30,26 @@ provider를 제외하면 영상에서 추출한 데이터가 외부로 전송되
 `auto`다. 공식 자료를 실제로 사용했는데 최종 부록에 근거와 링크가 없거나, 외부 자료로
 영상 내용을 다시 쓴 경우 strict 보관 감사를 통과하지 못한다.
 
+## Codex fresh-context 경계
+
+`scripts/run_fresh_codex_job.py`는 전처리를 지시한 긴 대화의 재해석 비용을 줄이기 위한
+문맥 격리 장치다. 새 `codex exec --ephemeral` 세션의 최초 prompt에는 전체 STT, OCR 또는
+Snapshot을 복사하지 않고 job 경로, 출력 언어, 감사 정책과 짧은 작업별 요청만 넣는다.
+`fresh_codex_handoff.json`에는 근거 파일의 크기·SHA-256과 Snapshot 수,
+`parent_conversation_inherited=false`, `raw_evidence_embedded_in_handoff=false`를 기록한다.
+
+macOS Codex seatbelt 안에서는 중첩 Codex app-server 초기화가 운영체제 정책으로 차단되므로
+launcher 명령 자체는 처음부터 sandbox escalation이 필요하다. 재사용 권한은
+`./scripts/run_fresh_codex_job.py`의 정확한 prefix로 제한한다. 이 outer launcher는 설정된
+jobs root의 직계 job만 허용하며, 새 worker에는 다시 `workspace-write`를 적용하고 repo와
+설정된 `MINUTES_HOME`만 쓰기 경로로 전달한다. child sandbox를 해제하지 않는다.
+
+이 경계는 Codex provider로부터 데이터를 숨기는 보안 기능이 아니다. 새 Codex 세션은 문서
+생성을 위해 로컬 job의 전체 STT·OCR과 필요한 Snapshot을 도구로 읽으므로, 그 내용은 사용자가
+선택한 Codex LLM provider에 노출될 수 있다. 다만 다른 외부 서비스로 원문을 넘기지 않으며,
+공식 자료 검색에는 앞 절의 일반화된 검색어 제한을 그대로 적용한다. 실행은 ephemeral이라
+세션 기록을 새로 영구 저장하지 않지만, 로컬 job과 최종 산출물의 기존 보존 정책은 유지한다.
+
 ## 자동 처리의 화자 정책
 
 `scripts/process_file.py`가 허용하는 값은 `SPEAKER_ATTRIBUTION_MODE=off|evidence`뿐이다.

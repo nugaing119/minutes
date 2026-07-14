@@ -142,6 +142,7 @@ def archive_job(
         "job_media_cleanup": job_media_cleanup,
         "reclaimed_bytes": job_media_cleanup["reclaimed_bytes"],
         "speaker_attribution": previous_status.get("speaker_attribution", {}),
+        "codex_handoff": previous_status.get("codex_handoff", {}),
         "content_audit": content_audit,
         "resource_policy": previous_status.get("resource_policy", {}),
         "process_metrics": process_metrics,

@@ -95,6 +95,18 @@ class ArchiveSpeakerArtifactsTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            (job_dir / "status.json").write_text(
+                json.dumps(
+                    {
+                        "status": "awaiting_codex",
+                        "codex_handoff": {
+                            "docx_enabled": False,
+                            "selected_snapshot_count": 1,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
             snapshots = job_dir / "snapshots"
             snapshots.mkdir()
             (snapshots / "snapshot_0001_00-00-00.jpg").write_bytes(b"image")
@@ -151,6 +163,10 @@ class ArchiveSpeakerArtifactsTests(unittest.TestCase):
             self.assertEqual(metrics["preprocessing_elapsed_seconds"], 12.5)
             self.assertEqual(metrics["elapsed_scope"], "local_preprocessing_only")
             self.assertEqual(status["process_metrics"]["state"], "completed")
+            self.assertEqual(
+                status["codex_handoff"]["selected_snapshot_count"],
+                1,
+            )
 
     def test_document_title_preserves_spaces_while_folder_title_is_safe(self) -> None:
         display_title, folder_title = resolve_document_titles(

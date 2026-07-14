@@ -356,10 +356,12 @@ def _process_file(media_path: Path, settings: Settings) -> Path:
             )
             screen_text_txt_path.write_text("", encoding="utf-8")
 
-        snapshot_evidence_available = (
-            (job_dir / "snapshots").is_dir()
-            and any((job_dir / "snapshots").glob("*.jpg"))
+        selected_snapshot_count = (
+            sum(1 for _ in (job_dir / "snapshots").glob("*.jpg"))
+            if (job_dir / "snapshots").is_dir()
+            else 0
         )
+        snapshot_evidence_available = selected_snapshot_count > 0
         if speaker_mode == "evidence":
             screen_available = bool(screen_text.strip()) or snapshot_evidence_available
             if snapshot_evidence_available:
@@ -430,6 +432,21 @@ def _process_file(media_path: Path, settings: Settings) -> Path:
                 state="awaiting_codex",
                 speaker_attribution=speaker_summary,
                 managed_source=str(job_source),
+                codex_handoff={
+                    "fresh_context_required": True,
+                    "input_path": str(codex_input_path),
+                    "snapshots_path": str(job_dir / "snapshots"),
+                    "output_language": getattr(
+                        settings,
+                        "output_language",
+                        "auto",
+                    ),
+                    "detected_language": str(
+                        transcript_result.get("language", "") or "unknown"
+                    ),
+                    "docx_enabled": bool(getattr(settings, "docx_enabled", True)),
+                    "selected_snapshot_count": selected_snapshot_count,
+                },
                 content_audit={
                     "mode": getattr(settings, "content_audit_mode", "off"),
                     "official_source_verification": getattr(

@@ -33,6 +33,8 @@ class DocumentationContractTests(unittest.TestCase):
             "COMPLETED_JOB_RETENTION_HOURS",
             "OCR_WORKERS",
             "OCR_TESSERACT_THREAD_LIMIT=1",
+            "run_fresh_codex_job.py",
+            "codex exec --ephemeral",
         )
 
         for relative_path, content in self.primary_docs.items():
@@ -97,6 +99,20 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("speaker_identity\": False", (REPO_ROOT / "scripts/vad_security.py").read_text(encoding="utf-8"))
         self.assertNotIn("embedding_model.ckpt", security)
         self.assertNotIn("torch.load(", security)
+
+    def test_fresh_codex_handoff_keeps_full_evidence_out_of_parent_context(self) -> None:
+        launcher = (REPO_ROOT / "scripts/run_fresh_codex_job.py").read_text(
+            encoding="utf-8"
+        )
+        skill = self.primary_docs["codex/skills/minutes/SKILL.md"]
+        security = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+
+        self.assertIn('"--ephemeral"', launcher)
+        self.assertIn('"parent_conversation_inherited": False', launcher)
+        self.assertIn('"raw_evidence_embedded_in_handoff": False', launcher)
+        self.assertIn("must not launch", skill)
+        self.assertIn("reads the complete `codex_minutes_input.md`", skill)
+        self.assertIn("Codex LLM provider에 노출될 수 있다", security)
 
 
 if __name__ == "__main__":

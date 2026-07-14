@@ -117,6 +117,14 @@ class ProcessFileRegressionTests(unittest.TestCase):
                 status["content_audit"]["official_source_verification"],
                 "auto",
             )
+            self.assertTrue(status["codex_handoff"]["fresh_context_required"])
+            self.assertEqual(status["codex_handoff"]["output_language"], "ko")
+            self.assertFalse(status["codex_handoff"]["docx_enabled"])
+            self.assertEqual(status["codex_handoff"]["selected_snapshot_count"], 0)
+            self.assertEqual(
+                Path(status["codex_handoff"]["input_path"]),
+                job_dir / "codex_minutes_input.md",
+            )
 
     def test_new_processing_purges_only_expired_completed_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

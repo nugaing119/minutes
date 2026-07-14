@@ -144,7 +144,11 @@ $minutes "~/Desktop/customer-call.mov" 내용에 맞는 문서로 정리해줘
 $minutes "~/remind/demo.mp4" CPU와 소요시간도 측정해줘
 ```
 
-`Codex 모드`는 오디오 추출·전사·OCR을 로컬 처리한 뒤, 생성된 `codex_minutes_input.md`와 선별 Snapshot을 Codex가 읽어 근거 기반 화자 판단과 실제 내용에 맞는 제목·섹션을 정하고 목표 언어의 `minutes.md`를 작성한 다음 최종 output 폴더로 정리하는 방식이다.
+`Codex 모드`는 오디오 추출·전사·OCR을 로컬 처리한 뒤, 기존 대화와 분리된 새
+`codex exec --ephemeral` 세션이 생성된 `codex_minutes_input.md` 전체와 선별 Snapshot을
+직접 읽어 근거 기반 화자 판단과 실제 내용에 맞는 제목·섹션을 정하고 목표 언어의
+`minutes.md`를 작성한 다음 최종 output 폴더로 정리하는 방식이다. handoff prompt에는
+원문을 넣지 않고 job 경로·출력 정책·해당 작업의 짧은 추가 요청만 넣는다.
 
 ## 6. 파일 하나 처리
 
@@ -195,11 +199,31 @@ Skill을 쓰지 않고 Codex 모드를 수동으로 실행할 수도 있다.
 LLM_PROVIDER=codex python scripts/process_file.py "~/remind/회의.mov"
 ```
 
-이 모드는 전사와 OCR을 끝낸 뒤 `~/minutes/jobs/<job_id>/codex_minutes_input.md`를 만들고 멈춘다. Codex가 해당 파일을 읽어 같은 job 폴더에 `minutes.md`를 작성한 뒤 다음 명령으로 최종 output 폴더에 정리한다.
+이 모드는 전사와 OCR을 끝낸 뒤
+`~/minutes/jobs/<job_id>/codex_minutes_input.md`를 만들고 멈춘다. 현재 대화에서 원문을
+읽거나 축약하지 말고, 출력된 job 경로를 새 Codex 세션에 넘긴다.
 
 ```bash
-python scripts/archive_job.py "<job-directory>"
+./scripts/run_fresh_codex_job.py "<job-directory>"
 ```
+
+작업별 추가 요청이 설정에 포함되지 않았다면 짧게 별도 전달할 수 있다.
+
+```bash
+./scripts/run_fresh_codex_job.py \
+  "<job-directory>" \
+  --request "CPU와 전체 소요시간도 보고"
+```
+
+새 세션은 전체 STT·OCR을 로컬 job에서 직접 읽는다. `fresh_codex_handoff.json`에는 원문
+파일의 크기·SHA-256과 Snapshot 수를 기록하지만 prompt 자체에는 원문을 복사하지 않는다.
+`CONTENT_AUDIT_MODE=strict`이면 `content_inventory.json`과 `content_audit.json`이
+통과해야만 보관되므로 새 세션 전환 때문에 근거 범위가 줄어들지 않는다.
+
+부모 Codex가 macOS seatbelt 안에서 실행 중이면 launcher가 다시 Codex를 초기화할 수 없으므로
+`./scripts/run_fresh_codex_job.py` 명령만 처음부터 escalation해 실행한다. 재사용 승인을
+설정한다면 이 정확한 launcher prefix로 한정한다. 새 worker 자체는 `workspace-write`로 다시
+격리되며 repo와 설정된 `MINUTES_HOME` 외의 쓰기 경로를 받지 않는다.
 
 ## 8. 자동 감시 실행
 

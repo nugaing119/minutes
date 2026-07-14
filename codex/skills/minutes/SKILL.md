@@ -64,6 +64,15 @@ repository. Do not assume the input is a meeting.
   until the audit passes.
 - If evidence exceeds one context, read it sequentially by timestamp into one cumulative
   inventory. Do not create lossy section summaries and summarize them again.
+- Keep the preprocessing conversation out of document synthesis. Outside a fresh worker,
+  run local preprocessing only, do not open the full transcript, OCR, or Snapshots, and hand
+  the prepared job to `./scripts/run_fresh_codex_job.py`. The launcher starts a new
+  `codex exec --ephemeral` session with only job paths, prepared policy values, and short
+  per-job overrides; it never embeds raw evidence in the handoff prompt.
+- A fresh worker, identified by its prompt and `MINUTES_FRESH_CONTEXT=1`, must not launch
+  another worker. It reads the complete `codex_minutes_input.md` directly from disk and
+  completes inventory, drafting, audit, archive, and verification. Do not silently fall back
+  to the long parent conversation if isolated execution fails.
 - The recording remains the source of truth for what was said. With
   `OFFICIAL_SOURCE_VERIFICATION=auto`, inspect local audio context, timestamped STT, OCR,
   and relevant Snapshots first. Use current official documents only to clarify remaining
@@ -87,18 +96,40 @@ For Codex-authored output:
 
 ```bash
 LLM_PROVIDER=codex python scripts/process_file.py "~/remind/<video>.mov"
+./scripts/run_fresh_codex_job.py "<prepared-job-directory>"
 ```
 
-Read the generated `~/minutes/jobs/<job_id>/codex_minutes_input.md` and only the selected
-Snapshots necessary for evidence resolution. In strict mode, write
-`content_inventory.json`, `official_sources.json`, `minutes.md`, and `content_audit.json`
-in that order, then archive:
+The parent session stops reading evidence after `process_file.py` prints the prepared job.
+If the user supplied a short instruction that is not already represented by
+`OUTPUT_LANGUAGE` or the job policy, pass only that instruction to the isolated worker:
+
+```bash
+./scripts/run_fresh_codex_job.py \
+  "<prepared-job-directory>" \
+  --request "Report total wall time and validation results"
+```
+
+Inside the fresh worker, read the generated
+`~/minutes/jobs/<job_id>/codex_minutes_input.md` completely and only the selected Snapshots
+necessary for evidence resolution. In strict mode, write `content_inventory.json`,
+`official_sources.json`, `minutes.md`, and `content_audit.json` in that order, then archive:
 
 ```bash
 python scripts/archive_job.py "<job-directory>"
 ```
 
 The H1 becomes the display title, output directory, and renamed media stem.
+
+`fresh_codex_handoff.json` records the full evidence file sizes and SHA-256 hashes, Snapshot
+count, the small prompt hash, `parent_conversation_inherited=false`, and
+`raw_evidence_embedded_in_handoff=false`. These are integrity and boundary checks; they do
+not replace the strict content inventory and post-draft audit.
+
+When the parent itself is running inside the macOS Codex seatbelt, launch
+`./scripts/run_fresh_codex_job.py` with initial `sandbox_permissions=require_escalated`.
+Use only the exact launcher prefix for reusable approval. The launcher validates that the job
+is a direct child of configured `~/minutes/jobs`, then starts the worker with its own
+`workspace-write` sandbox limited to the repository and configured minutes root.
 
 ## Expected Output Layout
 
@@ -145,6 +176,10 @@ bookmarks, and table geometry. Verify final-folder contents, source move semanti
 audit coverage, and retained job evidence. Specifically verify `speech_activity.json` is
 validation-only, `local_audio_diarization=disabled_by_policy`, and no diarization stage appears in
 metrics for either English or Korean input and whether or not screen evidence exists.
+For Codex mode, also verify `fresh_codex_handoff.json` reports an ephemeral session, no parent
+conversation inheritance, no raw evidence embedded in the handoff, matching input/Snapshot
+hashes, and `state=completed`. A zero Codex exit code without completed `status.json` and real
+archived source/Markdown files is a failure.
 
 When comparing a reprocessed document with an earlier result, assess speaker-name evidence,
 unsupported attribution, retained factual content, omissions, section structure, wall time,
@@ -161,6 +196,9 @@ name, but unresolved identity must never cause content loss.
   smaller Whisper model.
 - `soffice` crashes in the macOS sandbox: use `scripts/render_docx_checked.py` through an
   initially escalated command.
+- `failed to initialize in-process app-server client`: the fresh launcher was started inside
+  the parent seatbelt. Re-run the exact `./scripts/run_fresh_codex_job.py` command with initial
+  escalation; do not remove the child worker's `workspace-write` sandbox.
 
 ## References
 

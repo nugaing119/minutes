@@ -27,6 +27,8 @@
 - 최종 폴더에는 전달에 필요한 파일만 남긴다.
 - 전역 설치된 skill은 `allow_implicit_invocation: false`로 두고 `$minutes`를 명시한
   요청에서만 활성화해 다른 프로젝트 세션에 자동 주입하지 않는다.
+- Codex 문서 합성은 전처리를 지시한 긴 부모 대화를 상속하지 않는 새 ephemeral 세션에서
+  수행한다. 전사·OCR을 요약해 handoff하지 않고 새 세션이 job의 전체 근거를 직접 읽는다.
 
 지원 확장자는 `.mp4`, `.mkv`, `.mov`, `.m4a`, `.mp3`, `.wav`, `.aac`, `.flac`,
 `.ogg`다. OCR은 영상 입력에만 적용한다.
@@ -72,8 +74,10 @@ RECORDINGS_INBOX=~/remind
   → MLX Whisper 원문 언어 STT
   → Silero ONNX 발화 존재 검증(`validate_speech_activity`)
   → 영상이면 프레임 추출·로컬 OCR·Snapshot 선별
-  → STT/OCR/Snapshot 근거 기반 화자 판단
-  → 내용 inventory 작성
+  → 전체 근거의 크기·SHA-256·Snapshot 수를 handoff manifest에 기록
+  → job 경로·정책만 받은 새 `codex exec --ephemeral` 세션 실행
+  → 새 세션이 전체 STT/OCR/Snapshot을 직접 읽음
+  → 근거 기반 화자 판단과 내용 inventory 작성
   → 내용 기반 최종 Markdown 작성
   → 내용 보존 audit와 선택적 공식 근거 확인
   → DOCX 생성·렌더 검증
@@ -193,6 +197,20 @@ LLM_PROVIDER=codex
 CONTENT_AUDIT_MODE=strict
 OFFICIAL_SOURCE_VERIFICATION=auto
 ```
+
+전처리 후 부모 세션은 전체 `codex_minutes_input.md`, transcript, OCR, Snapshot을 읽지 않고
+`./scripts/run_fresh_codex_job.py`에 준비된 job 경로를 전달한다. launcher prompt에는 job 경로,
+`OUTPUT_LANGUAGE`, 감사·공식 근거 정책, 짧은 작업별 추가 요청만 넣는다. 원문은 prompt에
+복사하지 않으며 새 세션이 job 파일을 직접 읽는다. `fresh_codex_handoff.json`은
+`parent_conversation_inherited=false`, `raw_evidence_embedded_in_handoff=false`, 입력 파일
+크기와 SHA-256, Snapshot 수, 실행 시간과 완료 상태를 기록한다. fresh worker는 재귀적으로
+다른 worker를 실행할 수 없고, Codex가 정상 종료해도 `status.json=completed`와 실제 보관
+파일이 확인되지 않으면 실패로 처리한다.
+
+macOS Codex seatbelt 안에서는 중첩 app-server 초기화가 차단되므로 launcher 명령 자체만
+처음부터 escalation한다. 재사용 승인은 `./scripts/run_fresh_codex_job.py`의 정확한 prefix로
+제한한다. launcher가 만드는 worker는 다시 `workspace-write` 샌드박스를 적용하고 repo와
+설정된 `MINUTES_HOME`만 쓰기 가능 경로로 받는다.
 
 최종 H1, 문서 유형, H2/H3 구조는 파일명이나 플랫폼이 아니라 실제 내용을 바탕으로 정한다.
 최종 문서는 영상에서 전달된 내용을 기본적으로 그대로 보존하고, 인사·말버릇·의미가 완전히
