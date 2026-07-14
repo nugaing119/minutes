@@ -19,6 +19,8 @@ except Exception:
     def get_secret(account: str) -> str | None:
         return None
 
+from scripts.vad_security import expected_model_dir
+
 
 def _path_from_env(name: str, default: str) -> Path:
     return Path(os.environ.get(name, default)).expanduser()
@@ -45,6 +47,21 @@ def _bool_from_env(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _bounded_int_from_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    value = _int_from_env(name, default)
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _choice_from_env(name: str, default: str, choices: set[str]) -> str:
+    value = os.environ.get(name, default).strip().lower()
+    if value not in choices:
+        allowed = ", ".join(sorted(choices))
+        raise ValueError(f"Unsupported {name}: {value}. Allowed: {allowed}")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     minutes_home: Path
@@ -55,6 +72,14 @@ class Settings:
     whisper_device: str
     language: str
     output_language: str
+    content_audit_mode: str
+    official_source_verification: str
+    speaker_attribution_mode: str
+    speaker_attribution_required: bool
+    speech_activity_validation_enabled: bool
+    vad_model_dir: Path
+    process_qos: str
+    process_nice: int
     docx_enabled: bool
     audio_sample_rate: int
     audio_ffmpeg_threads: int
@@ -66,6 +91,7 @@ class Settings:
     ocr_languages: str
     ocr_max_context_chars: int
     ocr_ffmpeg_threads: int
+    ocr_workers: int
     ocr_tesseract_thread_limit: int
     ocr_tesseract_nice: int
     ocr_frame_pause_seconds: float
@@ -83,6 +109,8 @@ class Settings:
     ocr_tesseract_cpu_limit_period_seconds: float
     ocr_tesseract_cpu_limit_fallback_burst_cores: float
     cleanup_job_ocr_images_after_archive: bool
+    cleanup_job_media_after_archive: bool
+    completed_job_retention_hours: int
     watch_stable_seconds: int
     watch_poll_seconds: int
     llm_provider: str
@@ -98,6 +126,48 @@ class Settings:
 def load_settings() -> Settings:
     minutes_home = _path_from_env("MINUTES_HOME", "~/minutes")
     recordings_inbox = _path_from_env("RECORDINGS_INBOX", "~/remind")
+    llm_provider = _choice_from_env(
+        "LLM_PROVIDER",
+        "openai",
+        {"openai", "oci", "codex"},
+    )
+    content_audit_mode = _choice_from_env(
+        "CONTENT_AUDIT_MODE",
+        "off",
+        {"off", "warn", "strict"},
+    )
+    official_source_verification = _choice_from_env(
+        "OFFICIAL_SOURCE_VERIFICATION",
+        "off",
+        {"off", "auto", "required"},
+    )
+    if content_audit_mode != "off" and llm_provider != "codex":
+        raise ValueError(
+            "CONTENT_AUDIT_MODE requires LLM_PROVIDER=codex until provider-side "
+            "audit artifacts are supported"
+        )
+    if official_source_verification != "off" and content_audit_mode == "off":
+        raise ValueError(
+            "OFFICIAL_SOURCE_VERIFICATION requires CONTENT_AUDIT_MODE=warn or strict"
+        )
+    if official_source_verification != "off" and llm_provider != "codex":
+        raise ValueError(
+            "OFFICIAL_SOURCE_VERIFICATION requires LLM_PROVIDER=codex"
+        )
+    speaker_attribution_mode = _choice_from_env(
+        "SPEAKER_ATTRIBUTION_MODE",
+        "evidence",
+        {"off", "evidence"},
+    )
+    speaker_attribution_required = _bool_from_env(
+        "SPEAKER_ATTRIBUTION_REQUIRED",
+        False,
+    )
+    if speaker_attribution_required:
+        raise ValueError(
+            "SPEAKER_ATTRIBUTION_REQUIRED=true is incompatible with the "
+            "evidence-only speaker policy; uncertain speakers must remain unknown"
+        )
     return Settings(
         minutes_home=minutes_home,
         recordings_inbox=recordings_inbox,
@@ -108,7 +178,26 @@ def load_settings() -> Settings:
         ),
         whisper_device=os.environ.get("WHISPER_DEVICE", "gpu").lower(),
         language=os.environ.get("LANGUAGE", "auto"),
-        output_language=os.environ.get("OUTPUT_LANGUAGE", "ko"),
+        output_language=_choice_from_env(
+            "OUTPUT_LANGUAGE",
+            "auto",
+            {"auto", "en", "ko"},
+        ),
+        content_audit_mode=content_audit_mode,
+        official_source_verification=official_source_verification,
+        speaker_attribution_mode=speaker_attribution_mode,
+        speaker_attribution_required=speaker_attribution_required,
+        speech_activity_validation_enabled=_bool_from_env(
+            "SPEECH_ACTIVITY_VALIDATION_ENABLED",
+            True,
+        ),
+        vad_model_dir=expected_model_dir(minutes_home),
+        process_qos=_choice_from_env(
+            "PROCESS_QOS",
+            "utility",
+            {"off", "utility", "background", "maintenance"},
+        ),
+        process_nice=_bounded_int_from_env("PROCESS_NICE", 10, 0, 20),
         docx_enabled=_bool_from_env("DOCX_ENABLED", True),
         audio_sample_rate=_int_from_env("AUDIO_SAMPLE_RATE", 16000),
         audio_ffmpeg_threads=_int_from_env("AUDIO_FFMPEG_THREADS", 1),
@@ -126,9 +215,10 @@ def load_settings() -> Settings:
         ),
         ocr_enabled=_bool_from_env("OCR_ENABLED", True),
         ocr_frame_interval_seconds=_int_from_env("OCR_FRAME_INTERVAL_SECONDS", 10),
-        ocr_languages=os.environ.get("OCR_LANGUAGES", "kor+eng"),
+        ocr_languages=os.environ.get("OCR_LANGUAGES", "auto").strip().lower(),
         ocr_max_context_chars=_int_from_env("OCR_MAX_CONTEXT_CHARS", 12_000),
         ocr_ffmpeg_threads=_int_from_env("OCR_FFMPEG_THREADS", 1),
+        ocr_workers=_bounded_int_from_env("OCR_WORKERS", 1, 1, 16),
         ocr_tesseract_thread_limit=_int_from_env("OCR_TESSERACT_THREAD_LIMIT", 1),
         ocr_tesseract_nice=_int_from_env("OCR_TESSERACT_NICE", 10),
         ocr_frame_pause_seconds=_float_from_env("OCR_FRAME_PAUSE_SECONDS", 0.0),
@@ -185,9 +275,19 @@ def load_settings() -> Settings:
             "CLEANUP_JOB_OCR_IMAGES_AFTER_ARCHIVE",
             True,
         ),
+        cleanup_job_media_after_archive=_bool_from_env(
+            "CLEANUP_JOB_MEDIA_AFTER_ARCHIVE",
+            True,
+        ),
+        completed_job_retention_hours=_bounded_int_from_env(
+            "COMPLETED_JOB_RETENTION_HOURS",
+            24,
+            0,
+            8760,
+        ),
         watch_stable_seconds=_int_from_env("WATCH_STABLE_SECONDS", 15),
         watch_poll_seconds=_int_from_env("WATCH_POLL_SECONDS", 5),
-        llm_provider=os.environ.get("LLM_PROVIDER", "openai").lower(),
+        llm_provider=llm_provider,
         openai_api_key=os.environ.get("OPENAI_API_KEY") or get_secret("OPENAI_API_KEY"),
         openai_model=os.environ.get("OPENAI_MODEL") or get_secret("OPENAI_MODEL"),
         oci_genai_model=os.environ.get("OCI_GENAI_MODEL"),

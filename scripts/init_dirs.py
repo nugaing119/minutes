@@ -15,6 +15,7 @@ def main() -> None:
         settings.recordings_inbox,
         settings.jobs_dir,
         settings.output_dir,
+        settings.vad_model_dir.parent,
     ):
         path.mkdir(parents=True, exist_ok=True)
         print(f"created: {path}")

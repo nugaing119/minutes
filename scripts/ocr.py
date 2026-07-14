@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 import shutil
@@ -13,7 +14,13 @@ from scripts.cpu_limit import run_limited
 from scripts.utils import write_json
 
 
-def run_ocr(video_path: Path, job_dir: Path, settings: Settings) -> dict[str, Any]:
+def run_ocr(
+    video_path: Path,
+    job_dir: Path,
+    settings: Settings,
+    *,
+    detected_language: str | None = None,
+) -> dict[str, Any]:
     screen_text_path = job_dir / "screen_text.json"
     screen_text_txt_path = job_dir / "screen_text.txt"
 
@@ -34,6 +41,10 @@ def run_ocr(video_path: Path, job_dir: Path, settings: Settings) -> dict[str, An
         screen_text_txt_path.write_text("", encoding="utf-8")
         return result
 
+    ocr_languages = resolve_ocr_languages(
+        settings.ocr_languages,
+        detected_language,
+    )
     frames_dir = job_dir / "frames"
     snapshots_dir = job_dir / "snapshots"
     extract_frames(
@@ -45,79 +56,124 @@ def run_ocr(video_path: Path, job_dir: Path, settings: Settings) -> dict[str, An
         settings.ocr_frame_extract_cpu_limit_period_seconds,
         settings.ocr_frame_extract_cpu_limit_fallback_burst_cores,
     )
+    raw_frame_files = sorted(frames_dir.glob("frame_*.jpg"))
+    raw_frame_bytes = sum(
+        frame.stat().st_size for frame in raw_frame_files if frame.is_file()
+    )
     reset_snapshots(snapshots_dir)
     frames = []
     previous_text = ""
     previous_visual_signature: bytes | None = None
     snapshot_index = 0
+    workers = normalized_positive_int(getattr(settings, "ocr_workers", 1), 1)
 
-    for frame_path in sorted(frames_dir.glob("frame_*.jpg")):
-        timestamp_seconds = frame_index_to_seconds(
+    def signature_for(frame_path: Path) -> bytes | None:
+        return visual_frame_signature(
             frame_path,
-            settings.ocr_frame_interval_seconds,
-        )
-        visual_signature = None
-        if settings.ocr_visual_dedupe_enabled:
-            visual_signature = visual_frame_signature(
-                frame_path,
-                settings.ocr_visual_dedupe_ignore_bottom_ratio,
+            settings.ocr_visual_dedupe_ignore_bottom_ratio,
             settings.ocr_visual_dedupe_ignore_right_ratio,
             settings.ocr_ffmpeg_threads,
             settings.ocr_signature_cpu_limit_percent,
             settings.ocr_signature_cpu_limit_period_seconds,
             settings.ocr_signature_cpu_limit_fallback_burst_cores,
         )
-            if is_near_duplicate_visual(
-                previous_visual_signature,
-                visual_signature,
-                settings.ocr_visual_dedupe_max_mean_delta,
-            ):
-                pause_after_frame(settings.ocr_frame_pause_seconds)
-                continue
 
-        text = ocr_frame(
+    def text_for(frame_path: Path) -> str:
+        return ocr_frame(
             frame_path,
-            settings.ocr_languages,
+            ocr_languages,
             settings.ocr_tesseract_thread_limit,
             settings.ocr_tesseract_nice,
             settings.ocr_tesseract_cpu_limit_percent,
             settings.ocr_tesseract_cpu_limit_period_seconds,
             settings.ocr_tesseract_cpu_limit_fallback_burst_cores,
         )
-        text = normalize_ocr_text(text)
-        if not text:
-            pause_after_frame(settings.ocr_frame_pause_seconds)
-            continue
-        if is_near_duplicate(previous_text, text):
-            pause_after_frame(settings.ocr_frame_pause_seconds)
-            continue
-        previous_text = text
-        if visual_signature is not None:
-            previous_visual_signature = visual_signature
-        snapshot_index += 1
-        snapshot_path = copy_snapshot(
-            frame_path,
-            snapshots_dir,
-            snapshot_index,
-            timestamp_seconds,
-        )
-        frames.append(
-            {
-                "timestamp_seconds": timestamp_seconds,
-                "timestamp": seconds_to_timestamp(timestamp_seconds),
-                "frame": str(frame_path),
-                "snapshot": str(snapshot_path),
-                "text": text,
-            }
-        )
-        pause_after_frame(settings.ocr_frame_pause_seconds)
+
+    with ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix="minutes-ocr",
+    ) as executor:
+        for batch_start in range(0, len(raw_frame_files), workers):
+            batch_paths = raw_frame_files[batch_start : batch_start + workers]
+            if settings.ocr_visual_dedupe_enabled:
+                batch_signatures = list(executor.map(signature_for, batch_paths))
+            else:
+                batch_signatures = [None] * len(batch_paths)
+
+            first_candidate = 0
+            if settings.ocr_visual_dedupe_enabled:
+                while first_candidate < len(batch_paths) and is_near_duplicate_visual(
+                    previous_visual_signature,
+                    batch_signatures[first_candidate],
+                    settings.ocr_visual_dedupe_max_mean_delta,
+                ):
+                    pause_after_frame(settings.ocr_frame_pause_seconds)
+                    first_candidate += 1
+            if first_candidate >= len(batch_paths):
+                continue
+
+            candidate_paths = batch_paths[first_candidate:]
+            candidate_texts = list(executor.map(text_for, candidate_paths))
+            for offset, raw_text in enumerate(candidate_texts, start=first_candidate):
+                frame_path = batch_paths[offset]
+                visual_signature = batch_signatures[offset]
+                if settings.ocr_visual_dedupe_enabled and is_near_duplicate_visual(
+                    previous_visual_signature,
+                    visual_signature,
+                    settings.ocr_visual_dedupe_max_mean_delta,
+                ):
+                    pause_after_frame(settings.ocr_frame_pause_seconds)
+                    continue
+
+                text = normalize_ocr_text(raw_text)
+                if not text:
+                    pause_after_frame(settings.ocr_frame_pause_seconds)
+                    continue
+                if is_near_duplicate(previous_text, text):
+                    pause_after_frame(settings.ocr_frame_pause_seconds)
+                    continue
+                previous_text = text
+                if visual_signature is not None:
+                    previous_visual_signature = visual_signature
+                timestamp_seconds = frame_index_to_seconds(
+                    frame_path,
+                    settings.ocr_frame_interval_seconds,
+                )
+                snapshot_index += 1
+                snapshot_path = copy_snapshot(
+                    frame_path,
+                    snapshots_dir,
+                    snapshot_index,
+                    timestamp_seconds,
+                )
+                frames.append(
+                    {
+                        "timestamp_seconds": timestamp_seconds,
+                        "timestamp": seconds_to_timestamp(timestamp_seconds),
+                        "source_frame": frame_path.name,
+                        "snapshot": str(snapshot_path),
+                        "text": text,
+                    }
+                )
+                pause_after_frame(settings.ocr_frame_pause_seconds)
+
+    raw_frames_cleaned = False
+    raw_frames_cleanup_error = None
+    if getattr(settings, "cleanup_job_ocr_images_after_archive", True):
+        try:
+            shutil.rmtree(frames_dir)
+            raw_frames_cleaned = True
+        except OSError as exc:
+            raw_frames_cleanup_error = f"{type(exc).__name__}: {exc}"[:500]
 
     result = {
         "enabled": True,
         "status": "completed",
         "frame_interval_seconds": settings.ocr_frame_interval_seconds,
-        "languages": settings.ocr_languages,
+        "languages": ocr_languages,
+        "detected_source_language": detected_language,
         "ffmpeg_threads": normalized_positive_int(settings.ocr_ffmpeg_threads, 1),
+        "workers": workers,
         "tesseract_thread_limit": normalized_positive_int(
             settings.ocr_tesseract_thread_limit,
             1,
@@ -141,11 +197,34 @@ def run_ocr(video_path: Path, job_dir: Path, settings: Settings) -> dict[str, An
             0.0,
         ),
         "snapshots_dir": str(snapshots_dir),
+        "raw_frame_count": len(raw_frame_files),
+        "raw_frames_bytes": raw_frame_bytes,
+        "raw_frames_cleaned": raw_frames_cleaned,
+        "raw_frames_reclaimed_bytes": (
+            raw_frame_bytes if raw_frames_cleaned else 0
+        ),
         "frames": frames,
     }
+    if raw_frames_cleanup_error is not None:
+        result["raw_frames_cleanup_error"] = raw_frames_cleanup_error
     write_json(screen_text_path, result)
     screen_text_txt_path.write_text(render_screen_text(frames), encoding="utf-8")
     return result
+
+
+def resolve_ocr_languages(
+    configured_languages: str,
+    detected_language: str | None,
+) -> str:
+    configured = configured_languages.strip().lower()
+    if configured and configured != "auto":
+        return configured
+    detected = (detected_language or "").strip().lower()
+    if detected in {"en", "eng", "english"} or detected.startswith("en-"):
+        return "eng"
+    if detected in {"ko", "kor", "korean"} or detected.startswith("ko-"):
+        return "kor+eng"
+    return "eng+kor"
 
 
 def extract_frames(
@@ -173,6 +252,8 @@ def extract_frames(
             str(video_path),
             "-vf",
             f"fps=1/{interval_seconds}",
+            "-threads:v",
+            str(threads),
             str(frames_dir / "frame_%06d.jpg"),
         ],
         cpu_limit_percent=cpu_limit_percent,
@@ -304,6 +385,8 @@ def visual_frame_signature(
                 "-nostdin",
                 "-threads",
                 str(threads),
+                "-filter_threads",
+                str(threads),
                 "-i",
                 str(frame_path),
                 "-vf",
@@ -315,6 +398,8 @@ def visual_frame_signature(
                 "rawvideo",
                 "-pix_fmt",
                 "gray",
+                "-threads:v",
+                str(threads),
                 "-",
             ],
             cpu_limit_percent=cpu_limit_percent,

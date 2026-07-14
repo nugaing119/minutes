@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.shared import Inches, Pt, RGBColor, Twips
 
 
@@ -21,6 +23,10 @@ ORANGE_LIGHT = "FFF3E0"
 BORDER = "CCCCCC"
 WHITE = "FFFFFF"
 BODY_FONT = "Arial"
+CODE_FONT = "Courier New"
+INLINE_MARKDOWN_PATTERN = re.compile(
+    r"`(?P<code>[^`]+)`|\[(?P<link_text>[^\]]+)\]\((?P<link_url>https?://[^)]+)\)"
+)
 
 
 @dataclass
@@ -41,20 +47,58 @@ class MarkdownBlock:
 def generate_docx_report(
     markdown_path: Path,
     output_path: Path,
-    meeting_title: str,
-    saved_date: str,
+    document_title: str | None = None,
+    saved_date: str = "",
+    document_type: str | None = None,
+    meeting_title: str | None = None,
 ) -> Path:
     markdown = markdown_path.read_text(encoding="utf-8")
     blocks = parse_markdown(markdown)
-    heading_anchors = build_heading_anchors(blocks)
+    title_index = first_document_title_index(blocks)
+    markdown_title = blocks[title_index].text if title_index is not None else ""
+    resolved_title = (
+        (document_title or "").strip()
+        or (meeting_title or "").strip()
+        or markdown_title.strip()
+        or output_path.stem
+    )
+    resolved_type = (document_type or "").strip() or extract_document_type(markdown)
+    heading_anchors = build_heading_anchors(blocks, title_index=title_index)
+    heading_numbers, numbering_base_level = build_heading_numbers(
+        blocks,
+        title_index=title_index,
+    )
+    use_automatic_heading_numbers = bool(heading_numbers) and not has_manual_heading_numbers(
+        blocks,
+        heading_numbers,
+    )
 
     doc = Document()
     configure_document(doc)
     configure_styles(doc)
+    heading_num_id = (
+        add_heading_numbering_definition(doc)
+        if use_automatic_heading_numbers
+        else None
+    )
     add_header_footer(doc)
-    add_cover(doc, meeting_title, saved_date)
-    add_static_toc(doc, blocks, heading_anchors)
-    add_body(doc, blocks, heading_anchors)
+    add_cover(doc, resolved_title, saved_date, resolved_type)
+    add_static_toc(
+        doc,
+        blocks,
+        heading_anchors,
+        heading_numbers=heading_numbers if use_automatic_heading_numbers else {},
+        title_index=title_index,
+    )
+    add_body(
+        doc,
+        blocks,
+        heading_anchors,
+        heading_num_id=heading_num_id,
+        numbering_base_level=numbering_base_level,
+        numbered_heading_indexes=set(heading_numbers) if use_automatic_heading_numbers else set(),
+        title_index=title_index,
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
@@ -138,17 +182,185 @@ def split_table_row(line: str) -> list[str]:
     return [cell.replace("\\|", "|").strip() for cell in clean.split("|")]
 
 
-def build_heading_anchors(blocks: list[MarkdownBlock]) -> dict[int, str]:
+def first_document_title_index(blocks: list[MarkdownBlock]) -> int | None:
+    for index, block in enumerate(blocks):
+        if block.kind == "heading" and block.level == 1:
+            return index
+    return None
+
+
+def extract_document_type(markdown: str) -> str:
+    for line in markdown.splitlines():
+        match = re.match(r"^(?:문서 유형|Document type)\s*:\s*(.+)$", line.strip(), re.I)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def build_heading_anchors(
+    blocks: list[MarkdownBlock],
+    *,
+    title_index: int | None = None,
+) -> dict[int, str]:
     anchors = {}
     count = 1
     for index, block in enumerate(blocks):
         if block.kind != "heading" or block.level > 3:
             continue
-        if block.level == 1 and block.text == "회의록":
+        if index == title_index:
             continue
         anchors[index] = f"meeting_section_{count:04d}"
         count += 1
     return anchors
+
+
+def build_heading_numbers(
+    blocks: list[MarkdownBlock],
+    *,
+    title_index: int | None = None,
+) -> tuple[dict[int, str], int | None]:
+    headings = [
+        (index, block)
+        for index, block in enumerate(blocks)
+        if block.kind == "heading"
+        and index != title_index
+        and block.level <= 3
+    ]
+    if not headings:
+        return {}, None
+
+    base_level = min(block.level for _, block in headings)
+    counters = [0, 0, 0]
+    numbers: dict[int, str] = {}
+    for index, block in headings:
+        depth = block.level - base_level
+        if depth < 0 or depth >= len(counters):
+            continue
+        for parent_depth in range(depth):
+            if counters[parent_depth] == 0:
+                counters[parent_depth] = 1
+        counters[depth] += 1
+        for deeper in range(depth + 1, len(counters)):
+            counters[deeper] = 0
+        numbers[index] = ".".join(
+            str(counters[level]) for level in range(depth + 1)
+        )
+    return numbers, base_level
+
+
+def has_manual_heading_numbers(
+    blocks: list[MarkdownBlock],
+    heading_numbers: dict[int, str],
+) -> bool:
+    top_level_indexes = [
+        index
+        for index in heading_numbers
+        if "." not in heading_numbers[index]
+    ]
+    if not top_level_indexes:
+        return False
+    return all(
+        re.match(
+            rf"^{re.escape(heading_numbers[index])}[.)]\s+",
+            blocks[index].text,
+        )
+        for index in top_level_indexes
+    )
+
+
+def numbered_heading_text(number: str, text: str) -> str:
+    suffix = "." if "." not in number else ""
+    return f"{number}{suffix} {text}"
+
+
+def add_heading_numbering_definition(doc: Document) -> int:
+    numbering = doc.part.numbering_part.element
+    abstract_ids = [
+        int(element.get(qn("w:abstractNumId")))
+        for element in numbering.findall(qn("w:abstractNum"))
+    ]
+    num_ids = [
+        int(element.get(qn("w:numId")))
+        for element in numbering.findall(qn("w:num"))
+    ]
+    abstract_num_id = max(abstract_ids, default=-1) + 1
+    num_id = max(num_ids, default=0) + 1
+
+    abstract = OxmlElement("w:abstractNum")
+    abstract.set(qn("w:abstractNumId"), str(abstract_num_id))
+    multi_level_type = OxmlElement("w:multiLevelType")
+    multi_level_type.set(qn("w:val"), "multilevel")
+    abstract.append(multi_level_type)
+
+    for level in range(3):
+        level_element = OxmlElement("w:lvl")
+        level_element.set(qn("w:ilvl"), str(level))
+
+        start = OxmlElement("w:start")
+        start.set(qn("w:val"), "1")
+        level_element.append(start)
+
+        number_format = OxmlElement("w:numFmt")
+        number_format.set(qn("w:val"), "decimal")
+        level_element.append(number_format)
+
+        level_text = OxmlElement("w:lvlText")
+        pattern = ".".join(f"%{index + 1}" for index in range(level + 1))
+        if level == 0:
+            pattern += "."
+        level_text.set(qn("w:val"), pattern)
+        level_element.append(level_text)
+
+        suffix = OxmlElement("w:suff")
+        suffix.set(qn("w:val"), "space")
+        level_element.append(suffix)
+
+        justification = OxmlElement("w:lvlJc")
+        justification.set(qn("w:val"), "left")
+        level_element.append(justification)
+
+        paragraph_properties = OxmlElement("w:pPr")
+        indent = OxmlElement("w:ind")
+        indent.set(qn("w:left"), "0")
+        indent.set(qn("w:hanging"), "0")
+        paragraph_properties.append(indent)
+        level_element.append(paragraph_properties)
+        abstract.append(level_element)
+
+    first_num = numbering.find(qn("w:num"))
+    if first_num is None:
+        numbering.append(abstract)
+    else:
+        numbering.insert(numbering.index(first_num), abstract)
+
+    number = OxmlElement("w:num")
+    number.set(qn("w:numId"), str(num_id))
+    abstract_reference = OxmlElement("w:abstractNumId")
+    abstract_reference.set(qn("w:val"), str(abstract_num_id))
+    number.append(abstract_reference)
+    numbering.append(number)
+    return num_id
+
+
+def apply_heading_number(
+    paragraph,
+    *,
+    num_id: int,
+    level: int,
+) -> None:
+    paragraph_properties = paragraph._p.get_or_add_pPr()
+    number_properties = paragraph_properties.find(qn("w:numPr"))
+    if number_properties is None:
+        number_properties = OxmlElement("w:numPr")
+        paragraph_properties.append(number_properties)
+
+    indentation_level = OxmlElement("w:ilvl")
+    indentation_level.set(qn("w:val"), str(level))
+    number_properties.append(indentation_level)
+
+    number_id = OxmlElement("w:numId")
+    number_id.set(qn("w:val"), str(num_id))
+    number_properties.append(number_id)
 
 
 def configure_document(doc: Document) -> None:
@@ -182,7 +394,7 @@ def configure_styles(doc: Document) -> None:
 
     for style_name, size, color, before, after in (
         ("Heading 1", 16, BLUE_DARK, 20, 10),
-        ("Heading 2", 13, BLUE, 15, 7),
+        ("Heading 2", 13, BLUE, 13, 6),
         ("Heading 3", 11, BLUE_DARK, 10, 5),
     ):
         style = doc.styles[style_name]
@@ -221,26 +433,33 @@ def clear_paragraphs(paragraphs) -> None:
             run._element.getparent().remove(run._element)
 
 
-def add_cover(doc: Document, meeting_title: str, saved_date: str) -> None:
+def add_cover(
+    doc: Document,
+    document_title: str,
+    saved_date: str,
+    document_type: str = "",
+) -> None:
     for _ in range(5):
         doc.add_paragraph("")
 
     title = doc.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = title.add_run(meeting_title)
+    run = title.add_run(wrap_cover_title(document_title))
     run.font.name = BODY_FONT
     run._element.rPr.rFonts.set(qn("w:eastAsia"), BODY_FONT)
     run.font.size = Pt(28)
     run.font.bold = True
     run.font.color.rgb = RGBColor.from_string(BLUE_DARK)
 
-    subtitle = doc.add_paragraph()
-    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    subtitle_run = subtitle.add_run("회의록")
-    subtitle_run.font.name = BODY_FONT
-    subtitle_run.font.size = Pt(17)
-    subtitle_run.font.bold = True
-    subtitle_run.font.color.rgb = RGBColor.from_string(BLUE)
+    if document_type:
+        subtitle = doc.add_paragraph()
+        subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        subtitle_run = subtitle.add_run(document_type)
+        subtitle_run.font.name = BODY_FONT
+        subtitle_run._element.rPr.rFonts.set(qn("w:eastAsia"), BODY_FONT)
+        subtitle_run.font.size = Pt(17)
+        subtitle_run.font.bold = True
+        subtitle_run.font.color.rgb = RGBColor.from_string(BLUE)
 
     line = doc.add_paragraph()
     add_bottom_border(line, BLUE, "8")
@@ -255,19 +474,58 @@ def add_cover(doc: Document, meeting_title: str, saved_date: str) -> None:
     doc.add_page_break()
 
 
+def wrap_cover_title(document_title: str, *, max_line_width: int = 34) -> str:
+    """Wrap a long cover title only at a semantic word boundary."""
+    title = " ".join(document_title.split())
+    words = title.split(" ")
+    if len(words) < 2 or display_width(title) <= max_line_width:
+        return title
+
+    candidates: list[tuple[int, int, int]] = []
+    for index in range(1, len(words)):
+        left_width = display_width(" ".join(words[:index]))
+        right_width = display_width(" ".join(words[index:]))
+        candidates.append(
+            (
+                abs(left_width - right_width),
+                max(left_width, right_width),
+                index,
+            )
+        )
+    _, _, split_index = min(candidates)
+    return (
+        " ".join(words[:split_index])
+        + "\n"
+        + " ".join(words[split_index:])
+    )
+
+
+def display_width(text: str) -> int:
+    return sum(
+        2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
+        for character in text
+    )
+
+
 def add_static_toc(
     doc: Document,
     blocks: list[MarkdownBlock],
     heading_anchors: dict[int, str],
+    *,
+    heading_numbers: dict[int, str] | None = None,
+    title_index: int | None = None,
 ) -> None:
+    heading_numbers = heading_numbers or {}
     heading = doc.add_paragraph("목차", style="Heading 1")
     add_bottom_border(heading, BLUE, "6")
     for index, block in enumerate(blocks):
-        if block.kind != "heading" or block.level > 3:
+        if block.kind != "heading" or block.level > 3 or index == title_index:
             continue
-        text = block.text
-        if block.level == 1 and text == "회의록":
-            continue
+        text = (
+            numbered_heading_text(heading_numbers[index], block.text)
+            if index in heading_numbers
+            else block.text
+        )
         paragraph = doc.add_paragraph()
         paragraph.paragraph_format.left_indent = Inches(0.22 * max(block.level - 1, 0))
         add_internal_hyperlink(
@@ -283,14 +541,32 @@ def add_body(
     doc: Document,
     blocks: list[MarkdownBlock],
     heading_anchors: dict[int, str],
+    *,
+    heading_num_id: int | None = None,
+    numbering_base_level: int | None = None,
+    numbered_heading_indexes: set[int] | None = None,
+    title_index: int | None = None,
 ) -> None:
+    numbered_heading_indexes = numbered_heading_indexes or set()
     for index, block in enumerate(blocks):
         if block.kind == "heading":
-            if block.level == 1 and block.text == "회의록":
+            if index == title_index:
                 continue
             style = "Heading 1" if block.level <= 2 else "Heading 2" if block.level == 3 else "Heading 3"
             paragraph = doc.add_paragraph(block.text, style=style)
-            add_bookmark(paragraph, heading_anchors[index], index + 1)
+            if (
+                heading_num_id is not None
+                and numbering_base_level is not None
+                and index in numbered_heading_indexes
+            ):
+                apply_heading_number(
+                    paragraph,
+                    num_id=heading_num_id,
+                    level=block.level - numbering_base_level,
+                )
+            anchor = heading_anchors.get(index)
+            if anchor is not None:
+                add_bookmark(paragraph, anchor, index + 1)
             if style == "Heading 1":
                 add_bottom_border(paragraph, BLUE, "6")
         elif block.kind == "paragraph":
@@ -304,18 +580,112 @@ def add_body(
 
 def add_paragraph(doc: Document, text: str) -> None:
     paragraph = doc.add_paragraph()
-    run = paragraph.add_run(text)
-    run.font.name = BODY_FONT
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), BODY_FONT)
-    run.font.size = Pt(9.5)
+    add_inline_markdown(paragraph, text, size=9.5)
 
 
 def add_bullet(doc: Document, text: str) -> None:
     paragraph = doc.add_paragraph(style="List Bullet")
-    body = paragraph.add_run(text)
-    body.font.name = BODY_FONT
-    body._element.rPr.rFonts.set(qn("w:eastAsia"), BODY_FONT)
-    body.font.size = Pt(9.5)
+    add_inline_markdown(paragraph, text, size=9.5)
+
+
+def add_inline_markdown(
+    paragraph,
+    text: str,
+    *,
+    size: float,
+    bold: bool = False,
+    color: str = "000000",
+) -> None:
+    position = 0
+    for match in INLINE_MARKDOWN_PATTERN.finditer(text):
+        add_formatted_run(
+            paragraph,
+            text[position : match.start()],
+            size=size,
+            bold=bold,
+            color=color,
+        )
+        if match.group("code") is not None:
+            add_formatted_run(
+                paragraph,
+                match.group("code"),
+                size=size,
+                bold=bold,
+                color=color,
+                font=CODE_FONT,
+            )
+        else:
+            add_external_hyperlink(
+                paragraph,
+                match.group("link_text"),
+                match.group("link_url"),
+                size=size,
+            )
+        position = match.end()
+    add_formatted_run(
+        paragraph,
+        text[position:],
+        size=size,
+        bold=bold,
+        color=color,
+    )
+
+
+def add_formatted_run(
+    paragraph,
+    text: str,
+    *,
+    size: float,
+    bold: bool,
+    color: str,
+    font: str = BODY_FONT,
+) -> None:
+    if not text:
+        return
+    run = paragraph.add_run(text)
+    run.font.name = font
+    run._element.rPr.rFonts.set(qn("w:ascii"), font)
+    run._element.rPr.rFonts.set(qn("w:hAnsi"), font)
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), font)
+    run.font.size = Pt(size)
+    run.font.bold = bold
+    run.font.color.rgb = RGBColor.from_string(color)
+
+
+def add_external_hyperlink(paragraph, text: str, url: str, *, size: float) -> None:
+    relationship_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), relationship_id)
+    hyperlink.set(qn("w:history"), "1")
+
+    run = OxmlElement("w:r")
+    run_properties = OxmlElement("w:rPr")
+
+    fonts = OxmlElement("w:rFonts")
+    fonts.set(qn("w:ascii"), BODY_FONT)
+    fonts.set(qn("w:hAnsi"), BODY_FONT)
+    fonts.set(qn("w:eastAsia"), BODY_FONT)
+    run_properties.append(fonts)
+
+    size_element = OxmlElement("w:sz")
+    size_element.set(qn("w:val"), str(int(size * 2)))
+    run_properties.append(size_element)
+
+    color_element = OxmlElement("w:color")
+    color_element.set(qn("w:val"), BLUE)
+    run_properties.append(color_element)
+
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    run_properties.append(underline)
+
+    text_element = OxmlElement("w:t")
+    text_element.text = text
+
+    run.append(run_properties)
+    run.append(text_element)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
 
 
 def add_internal_hyperlink(paragraph, text: str, anchor: str, color: str) -> None:
@@ -421,12 +791,13 @@ def set_cell_text(
     paragraph.alignment = align
     paragraph.paragraph_format.space_before = Pt(1)
     paragraph.paragraph_format.space_after = Pt(1)
-    run = paragraph.add_run(text)
-    run.font.name = BODY_FONT
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), BODY_FONT)
-    run.font.size = Pt(8.5)
-    run.font.bold = bold
-    run.font.color.rgb = RGBColor.from_string(color)
+    add_inline_markdown(
+        paragraph,
+        text,
+        size=8.5,
+        bold=bold,
+        color=color,
+    )
 
 
 def set_table_width(table, width: int, widths: list[int]) -> None:

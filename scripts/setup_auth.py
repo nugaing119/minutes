@@ -13,7 +13,7 @@ from scripts.keychain import set_secret
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Store OpenAI credentials in macOS Keychain."
+        description="Store meeting-minutes credentials in macOS Keychain."
     )
     parser.add_argument(
         "--model",

@@ -1,1 +1,2 @@
-oci
+oci==2.181.1
+cryptography==48.0.1

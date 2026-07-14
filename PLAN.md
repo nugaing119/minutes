@@ -1,862 +1,368 @@
-# Mac Local Meeting Minutes Plan
+# minutes 현재 아키텍처와 운영 계획
 
-## 1. 목표
+기준일: 2026-07-14
 
-회의, 강의, 웨비나 등 영상 또는 녹음 파일을 Mac에서 로컬 처리해 전사 파일, OCR 보조 자료, 한국어 회의록 Markdown, DOCX를 생성한다.
+이 문서는 초기 MVP 구상이 아니라 현재 구현된 동작과 앞으로 유지할 운영 계약을 설명한다.
+사용 방법은 [README.md](README.md)와 [INSTALL_USAGE.md](INSTALL_USAGE.md), 보안 경계는
+[SECURITY.md](SECURITY.md), Codex 실행 절차는
+[codex/skills/minutes/SKILL.md](codex/skills/minutes/SKILL.md)를 따른다. 문서와 코드가
+다르면 `scripts/`, `config.example.env`, 자동화 테스트에서 확인되는 실제 동작을 우선하고
+문서를 함께 수정한다.
 
-기본 입력 폴더는 `~/remind/`다. 자동 감시 모드에서는 이 폴더에 새로 저장된 영상 또는 녹음 파일을 감지한다. 수동 실행 모드에서는 파일 경로를 직접 지정하며, 이 경우 파일이 꼭 `~/remind/` 안에 있을 필요는 없다. 시스템은 파일 저장 완료 또는 지정된 입력 파일을 기준으로 오디오 추출, STT, OCR, 회의록 생성, 최종 파일 정리를 순서대로 수행한다. OCR은 영상 입력에만 적용하고, 녹음 파일 입력에서는 건너뛴다.
+## 1. 목표와 범위
 
-최종 결과물은 회의록이 저장된 시점의 로컬 날짜 폴더에 모은다.
+영상 또는 오디오 파일을 Mac에서 로컬 분석해 원문 근거가 보존된 Markdown과 DOCX 문서를
+만든다. 입력을 회의나 특정 영상 서비스로 가정하지 않는다. 강의, 기술 발표, 인터뷰,
+토론, 업무 협의, 데모 등 실제 내용에 따라 제목, 문서 유형, 섹션을 결정한다.
 
-```text
-~/minutes/output/YYYY-MM-DD/
-  회의-주제/
-    YYYY-MM-DD_회의-주제.mp4 또는 YYYY-MM-DD_회의-주제.m4a
-    YYYY-MM-DD_회의-주제.md
-    YYYY-MM-DD_회의-주제.docx
-    YYYY-MM-DD_회의-주제.transcript.txt
-    YYYY-MM-DD_회의-주제.transcript.json
-    YYYY-MM-DD_회의-주제.transcript.srt
-    YYYY-MM-DD_회의-주제.screen_text.txt
-    YYYY-MM-DD_회의-주제.screen_text.json
-    snapshots/
-```
+다음 원칙을 고정한다.
 
-## 2. 기본 경로 정책
+- `회의록`, `Meeting Minutes`, `영상 요약` 같은 제목이나 회의 전용 목차를 고정하지 않는다.
+- Zoom, Teams, Meet, OBS 등 서비스별 프로필을 만들지 않는다.
+- STT와 OCR은 감지한 원문 언어를 유지한다.
+- 최종 언어만 `OUTPUT_LANGUAGE`로 선택한다.
+- 로컬 음향 화자분리는 자동 처리에서 실행하지 않는다.
+- 원문에 없는 사실이나 화자 이름을 만들지 않는다.
+- 글자 수, 토큰 수, 페이지 수, bullet 수, section 수의 하드 상한을 두지 않는다.
+- 최종 폴더에는 전달에 필요한 파일만 남긴다.
+- 전역 설치된 skill은 `allow_implicit_invocation: false`로 두고 `$minutes`를 명시한
+  요청에서만 활성화해 다른 프로젝트 세션에 자동 주입하지 않는다.
 
-프로젝트 코드는 git clone 받은 위치에 둔다. 자동 처리할 영상 또는 녹음 파일은 기본적으로 사용자 홈 디렉터리의 `remind/`에 저장한다. 내부 작업 파일과 결과물은 repo 내부가 아니라 사용자 홈 디렉터리 아래 `minutes/`에 저장한다.
+지원 확장자는 `.mp4`, `.mkv`, `.mov`, `.m4a`, `.mp3`, `.wav`, `.aac`, `.flac`,
+`.ogg`다. OCR은 영상 입력에만 적용한다.
 
-기본 입력 위치는 `~/remind`이고, 기본 작업/결과 저장 위치는 `~/minutes`다.
+## 2. 경로와 입력 파일 정책
 
-코드에서는 하드코딩하지 않고 `RECORDINGS_INBOX`와 `MINUTES_HOME` 변수로 관리한다.
-
-```python
-from pathlib import Path
-import os
-
-MINUTES_HOME = Path(os.environ.get("MINUTES_HOME", "~/minutes")).expanduser()
-RECORDINGS_INBOX = Path(os.environ.get("RECORDINGS_INBOX", "~/remind")).expanduser()
-
-JOBS_DIR = MINUTES_HOME / "jobs"
-OUTPUT_DIR = MINUTES_HOME / "output"
-```
-
-사용자는 환경변수로 저장 위치를 바꿀 수 있다.
-
-```bash
-export MINUTES_HOME="$HOME/Documents/minutes"
-export RECORDINGS_INBOX="$HOME/Movies/Recordings"
-```
-
-이 원칙 때문에 어떤 사용자가 repo를 clone해도 기본적으로 자기 홈 디렉터리의 `remind/`와 `minutes/` 기준으로 바로 사용할 수 있다.
-
-## 3. 디렉터리 구조
-
-repo에는 실행 코드와 설정 예시만 둔다.
-
-```text
-meeting-minutes/
-  scripts/
-    transcribe.py
-    summarize.py
-    watch_recordings.py
-  config.example.env
-  requirements.txt
-  README.md
-  PLAN.md
-```
-
-자동 감시 대상 입력은 `RECORDINGS_INBOX`에 둔다. 수동 실행 시에는 임의 경로의 영상 또는 녹음 파일을 직접 지정할 수 있다. 작업 파일과 최종 결과물은 `MINUTES_HOME` 아래에 저장한다.
-
-```text
-~/remind/
-  meeting_recording.mp4
-  meeting_audio.m4a
-
-~/minutes/
-  jobs/
-    <job_id>/
-      source.<ext>
-      audio.wav
-      transcript.json
-      transcript.txt
-      transcript.srt
-      screen_text.json
-      screen_text.txt
-      snapshots/
-      minutes.raw.json
-      minutes.md
-      status.json
-      logs.txt
-
-  output/
-    2026-06-17/
-      신규-회의록-서비스-MVP-검토/
-        2026-06-17_신규-회의록-서비스-MVP-검토.mp4
-        2026-06-17_신규-회의록-서비스-MVP-검토.md
-        2026-06-17_신규-회의록-서비스-MVP-검토.docx
-        2026-06-17_신규-회의록-서비스-MVP-검토.transcript.txt
-        2026-06-17_신규-회의록-서비스-MVP-검토.transcript.json
-        2026-06-17_신규-회의록-서비스-MVP-검토.transcript.srt
-        2026-06-17_신규-회의록-서비스-MVP-검토.screen_text.txt
-        2026-06-17_신규-회의록-서비스-MVP-검토.screen_text.json
-        snapshots/
-```
-
-`jobs/`는 내부 처리, 실패 복구, 디버깅을 위한 공간이다.
-
-`output/`은 사용자가 실제로 열어보는 최종 결과물 공간이다.
-
-## 4. 전체 처리 흐름
-
-```text
-영상 또는 녹음 파일
-  ↓
-파일 생성 완료 감지 또는 수동 지정
-  ↓
-~/minutes/jobs/<job_id>/ 생성
-  ↓
-source.<ext> 복사
-  ↓
-ffmpeg로 audio.wav 추출
-  ↓
-mlx-whisper로 STT
-  ↓
-transcript.json / transcript.txt / transcript.srt 생성
-  ↓
-10초 간격 프레임 추출
-  ↓
-로컬 OCR로 screen_text.json / screen_text.txt 생성
-  ↓
-설정된 LLM provider로 회의록 구조화
-  ↓
-minutes.raw.json 생성
-  ↓
-minutes.md 생성
-  ↓
-회의 주제 추출
-  ↓
-저장 시점 날짜 계산
-  ↓
-~/minutes/output/YYYY-MM-DD/ 생성
-  ↓
-영상, 회의록, 전사 파일을 같은 basename으로 저장
-```
-
-## 5. 파일 감지
-
-자동 감시 모드는 `~/remind/` 폴더를 감시한다. 설정값 `RECORDINGS_INBOX`로 다른 폴더를 지정할 수 있다.
-
-수동 실행 모드는 감시 폴더와 무관하게 사용자가 지정한 영상 또는 녹음 파일을 바로 처리한다.
-
-```bash
-python scripts/process_file.py "/Users/jun/Desktop/2026-06-18 고객 미팅.mov"
-python scripts/process_file.py "/Users/jun/Desktop/2026-06-18 고객 미팅.m4a"
-```
-
-우선 지원할 입력 확장자는 다음과 같다.
-
-```text
-.mp4
-.mkv
-.mov
-.m4a
-.mp3
-.wav
-.aac
-.flac
-.ogg
-```
-
-영상 또는 녹음 파일은 저장 중에도 파일이 먼저 보일 수 있으므로, 생성 이벤트만 보고 바로 처리하지 않는다. 파일 크기와 수정 시각이 일정 시간 동안 변하지 않을 때 저장 완료로 판단한다.
-
-권장 흐름은 다음과 같다.
-
-```text
-새 파일 발견
-  ↓
-파일 크기와 수정 시각 확인
-  ↓
-WATCH_POLL_SECONDS 뒤 다시 확인
-  ↓
-WATCH_STABLE_SECONDS 동안 변화가 없으면 저장 완료로 판단
-  ↓
-job 생성 후 처리 시작
-```
-
-## 6. Job 생성과 중복 방지
-
-각 입력 파일마다 고유한 `job_id`를 만든다. 파일명만 기준으로 삼으면 같은 이름의 파일이 다시 들어왔을 때 충돌할 수 있으므로 다음 정보를 함께 사용한다.
-
-```text
-원본 파일 경로
-파일 크기
-수정 시각
-필요하면 해시 일부
-```
-
-예시다.
-
-```text
-~/minutes/jobs/20260617_143000_meeting_recording_ab12cd34/
-```
-
-완료된 파일은 다시 처리하지 않는다. 처리 이력은 각 job의 `status.json`과 전체 index 파일로 추적할 수 있다.
-
-```text
-~/minutes/jobs/index.json
-```
-
-index에는 원본 파일 fingerprint, 최종 output 경로, basename을 기록한다.
-
-## 7. 오디오 추출
-
-`ffmpeg`로 입력 파일에서 STT용 오디오를 추출한다. 녹음 파일도 같은 경로로 mono 16kHz wav로 변환한다.
-
-출력 위치는 다음과 같다.
-
-```text
-~/minutes/jobs/<job_id>/audio.wav
-```
-
-기본 포맷은 STT에 맞춰 단순하게 유지한다.
-
-```text
-mono
-16kHz
-wav
-```
-
-명령 개념은 다음과 같다.
-
-```bash
-ffmpeg -y -i source.<ext> -vn -ac 1 -ar 16000 audio.wav
-```
-
-## 8. STT 전사
-
-전사는 `mlx-whisper`로 수행한다.
-
-기본 모델은 다음과 같다.
-
-```text
-mlx-community/whisper-large-v3-turbo
-```
-
-모델과 언어는 설정값으로 관리한다.
-
-```env
-WHISPER_MODEL=mlx-community/whisper-large-v3-turbo
-WHISPER_DEVICE=gpu
-LANGUAGE=auto
-```
-
-`LANGUAGE=auto`는 STT 입력 언어 자동 감지를 의미한다. 영어 회의는 영어로 전사한 뒤 회의록 생성 단계에서 한국어로 정리한다. 한국어 회의는 한국어 전사를 기반으로 한국어 회의록을 만든다. 특정 입력 언어를 강제하고 싶을 때만 `LANGUAGE=ko` 또는 `LANGUAGE=en`처럼 지정한다.
-
-`WHISPER_DEVICE=gpu`는 Apple Silicon에서 MLX Metal/GPU 경로를 명시적으로 사용한다.
-
-전사 결과는 세 가지 파일로 저장한다.
-
-```text
-transcript.json
-transcript.txt
-transcript.srt
-```
-
-각 파일의 역할은 다음과 같다.
-
-```text
-transcript.json
-- segment, timestamp 등 구조화 정보 보존
-- 후속 처리와 재처리에 사용
-
-transcript.txt
-- 회의록 생성 입력
-- 사람이 빠르게 확인하기 쉬운 텍스트
-
-transcript.srt
-- 영상과 맞춰 검수하기 좋은 자막 파일
-```
-
-## 9. OCR 처리
-
-OCR은 화면 공유 자료나 슬라이드의 텍스트를 회의록 생성 입력에 보조 근거로 넣기 위한 단계다.
-
-기본 설정은 다음과 같다.
-
-```env
-OCR_ENABLED=true
-OCR_FRAME_INTERVAL_SECONDS=10
-OCR_LANGUAGES=kor+eng
-OCR_MAX_CONTEXT_CHARS=12000
-OCR_FFMPEG_THREADS=1
-OCR_TESSERACT_THREAD_LIMIT=1
-OCR_TESSERACT_NICE=10
-OCR_FRAME_PAUSE_SECONDS=0
-OCR_VISUAL_DEDUPE_ENABLED=true
-OCR_VISUAL_DEDUPE_IGNORE_BOTTOM_RATIO=0.18
-OCR_VISUAL_DEDUPE_IGNORE_RIGHT_RATIO=0.20
-OCR_VISUAL_DEDUPE_MAX_MEAN_DELTA=6.0
-AUDIO_CPU_LIMIT_PERCENT=60
-AUDIO_CPU_LIMIT_PERIOD_SECONDS=0.2
-AUDIO_CPU_LIMIT_FALLBACK_BURST_CORES=2.5
-OCR_FRAME_EXTRACT_CPU_LIMIT_PERCENT=80
-OCR_FRAME_EXTRACT_CPU_LIMIT_PERIOD_SECONDS=0.2
-OCR_FRAME_EXTRACT_CPU_LIMIT_FALLBACK_BURST_CORES=1.5
-OCR_SIGNATURE_CPU_LIMIT_PERCENT=0
-OCR_SIGNATURE_CPU_LIMIT_PERIOD_SECONDS=0.2
-OCR_SIGNATURE_CPU_LIMIT_FALLBACK_BURST_CORES=2.5
-OCR_TESSERACT_CPU_LIMIT_PERCENT=0
-OCR_TESSERACT_CPU_LIMIT_PERIOD_SECONDS=0.2
-OCR_TESSERACT_CPU_LIMIT_FALLBACK_BURST_CORES=2.5
-CLEANUP_JOB_OCR_IMAGES_AFTER_ARCHIVE=true
-```
-
-기본 동작은 다음과 같다.
-
-```text
-영상 파일
-  ↓
-ffmpeg로 10초마다 프레임 1장 추출
-  ↓
-로컬 tesseract OCR 실행
-  ↓
-화면 유사도 기반 중복 프레임 선제 제거
-  ↓
-인접 중복 텍스트 제거
-  ↓
-중복 제거 후 남은 프레임을 snapshots/에 이미지로 저장
-  ↓
-screen_text.json / screen_text.txt 저장
-```
-
-OCR 산출물은 job 폴더와 최종 output 폴더에 함께 저장한다.
-
-```text
-screen_text.json
-screen_text.txt
-snapshots/
-  snapshot_0001_00-00-00.jpg
-  snapshot_0002_00-00-10.jpg
-```
-
-OCR 결과는 회의록 생성 입력에 `[화면 공유 OCR 텍스트]` 섹션으로 추가한다. 이 텍스트는 음성 전사를 보완하는 근거로만 사용하고, OCR 오인식이 의심되는 내용은 단정하지 않는다.
-
-최종 output 폴더에는 날짜 폴더 아래 회의 주제명으로 된 `회의-주제/` 폴더를 만들고, 그 안의 `snapshots/`에 OCR 중복 제거를 통과한 snapshot 이미지만 복사한다.
-
-최종 output 복사가 끝나면 기본적으로 job 내부의 `frames/`와 `snapshots/`를 삭제한다. `screen_text.json/txt`는 작고 재검토에 필요하므로 job에도 남긴다. 디버깅을 위해 원본 OCR 이미지를 job에 남기고 싶으면 `CLEANUP_JOB_OCR_IMAGES_AFTER_ARCHIVE=false`로 끈다.
-
-`tesseract`가 설치되어 있지 않거나 OCR이 실패하면 `screen_text.json`에 `skipped` 또는 `failed` 상태를 남긴다. 이 경우에도 STT와 회의록 생성은 계속 진행한다.
-
-CPU peak를 낮추기 위해 단계별 외부 프로세스 제한을 분리한다. 짧지만 peak가 큰 오디오 추출 `ffmpeg`는 `AUDIO_CPU_LIMIT_PERCENT`로 제어하고, OCR 프레임 추출 `ffmpeg`는 `OCR_FRAME_EXTRACT_CPU_LIMIT_PERCENT`로 따로 제어한다. 화면 서명 계산과 Tesseract OCR도 각각 `OCR_SIGNATURE_CPU_LIMIT_PERCENT`, `OCR_TESSERACT_CPU_LIMIT_PERCENT`로 분리되어 있다.
-
-기본 balanced 설정은 오디오 추출과 OCR 프레임 추출만 제한하고, 화면 서명과 Tesseract는 처리량 유지를 위해 별도 CPU 제한을 끈다. Tesseract는 `OCR_TESSERACT_THREAD_LIMIT=1`과 `OCR_TESSERACT_NICE=10`으로 스레드 수와 우선순위를 낮춘다. 더 낮은 부하가 필요하면 `OCR_FRAME_INTERVAL_SECONDS`를 늘리고, `OCR_TESSERACT_NICE`를 높이며, `OCR_FRAME_PAUSE_SECONDS`로 프레임 사이 대기 시간을 둔다.
-
-## 10. LLM provider 정책
-
-회의록 생성에는 LLM API를 사용한다. 구현은 특정 벤더에 고정하지 않고 provider 인터페이스로 분리한다.
-
-초기 provider는 다음 두 가지를 대상으로 한다.
-
-```text
-openai
-oci
-```
-
-설정값으로 사용할 provider를 고른다.
-
-```env
-LLM_PROVIDER=openai
-```
-
-OpenAI API를 사용할 때 필요한 설정은 다음과 같다.
-
-```env
-OPENAI_API_KEY=
-OPENAI_MODEL=
-```
-
-OCI GenAI API를 사용할 때 필요한 설정은 다음과 같다.
-
-```env
-OCI_GENAI_MODEL=
-OCI_GENAI_COMPARTMENT_ID=
-OCI_GENAI_ENDPOINT=
-OCI_CONFIG_FILE=~/.oci/config
-OCI_PROFILE=DEFAULT
-```
-
-구현에서는 provider별 호출부만 분리하고, 회의록 생성 파이프라인은 동일하게 유지한다.
-
-```text
-transcript.txt
-  ↓
-provider.generate_minutes_json(...)
-  ↓
-minutes.raw.json
-  ↓
-minutes.md
-```
-
-provider 구현은 다음 계약을 맞춘다.
-
-```text
-입력:
-- 전사 텍스트 또는 전사 chunk 목록
-- 회의록 생성 프롬프트
-- 출력 JSON schema 설명
-- 출력 언어 설정
-
-출력:
-- meeting_title
-- summary
-- decisions
-- action_items
-- discussion
-- open_questions
-```
-
-회의록 출력 언어는 한국어로 고정한다. 영어는 제품명, 회사명, 사람 이름, API 이름, 코드명, 명령어, 원문 의미 보존이 필요한 짧은 인용에만 사용한다.
-
-LLM 호출 실패는 `status.json`에 `step: summarize`로 기록한다. 인증 실패, quota 부족, 네트워크 실패, 응답 JSON 파싱 실패는 구분해서 로그에 남긴다.
-
-구현 시점에는 각 provider의 최신 공식 문서를 기준으로 SDK, 인증, 요청/응답 형식을 확인한다.
-
-## 11. 회의록 생성
-
-전사 결과에서 바로 Markdown만 만들지 않고, 먼저 구조화된 중간 JSON을 만든다.
-
-```text
-transcript.txt
-  ↓
-minutes.raw.json
-  ↓
-minutes.md
-```
-
-`minutes.raw.json`은 회의록 생성 결과의 원본 구조다.
-
-```json
-{
-  "meeting_title": "신규 회의록 서비스 MVP 검토",
-  "summary": [
-    "녹화 영상 파일을 기반으로 Mac 로컬 회의록 시스템을 만든다.",
-    "mlx-whisper를 사용해 로컬 전사를 수행한다.",
-    "최종 결과물은 저장 시점 날짜 폴더에 정리한다."
-  ],
-  "decisions": [
-    "회의록은 Markdown 파일로 저장한다.",
-    "원본 영상과 회의록은 같은 날짜 폴더에 배치한다."
-  ],
-  "action_items": [
-    {
-      "owner": "미정",
-      "task": "단일 파일 STT 스크립트 작성",
-      "due": "미정",
-      "evidence": "MVP 처리 흐름 논의"
-    }
-  ],
-  "open_questions": [
-    "초기 요약 모델 설정 결정 필요"
-  ]
-}
-```
-
-최종 Markdown은 다음 형식을 사용한다.
-
-```markdown
-# 회의록
-
-## 1. 회의 요약
-- 핵심 내용을 5개 이내로 요약
-
-## 2. 주요 결정사항
-- 결정된 내용만 작성
-
-## 3. 액션 아이템
-| 담당자 | 할 일 | 기한 | 근거 |
-|---|---|---|---|
-
-## 4. 논의 상세
-### 주제명
-- 논의 내용
-- 쟁점
-- 결론
-
-## 5. 확인 필요 사항
-- 전사상 불명확하거나 추가 확인이 필요한 내용
-```
-
-회의록 본문 작성 규칙은 다음과 같다.
-
-```text
-회의록은 반드시 한국어로 작성한다.
-영어는 필요한 경우에만 유지한다.
-한국어 문장은 자연스럽게 끝낸다.
-전사 오류는 문맥상 자연스럽게 보정하되 없는 내용을 만들지 않는다.
-불확실한 내용은 단정하지 않고 확인 필요 사항에 적는다.
-```
-
-긴 회의는 전사 전체를 한 번에 처리하지 않고 chunk 단위로 나눈다.
-
-```text
-전사 segment
-  ↓
-5~10분 단위 chunk
-  ↓
-chunk별 요약/결정/액션 후보 추출
-  ↓
-전체 병합
-  ↓
-최종 minutes.raw.json 생성
-  ↓
-minutes.md 생성
-```
-
-## 12. 파일명 생성
-
-최종 파일명은 저장 시점 날짜와 회의 주제를 결합한다.
-
-```text
-YYYY-MM-DD_회의-주제
-```
-
-예시다.
-
-```text
-2026-06-17_신규-회의록-서비스-MVP-검토
-```
-
-회의 주제는 `minutes.raw.json`의 `meeting_title`을 사용한다.
-
-파일명 안전화 규칙은 다음과 같다.
-
-```text
-공백은 -로 바꾼다.
-슬래시 등 경로 문자는 제거한다.
-제목이 너무 길면 적당히 자른다.
-제목이 비어 있으면 원본 파일명을 기반으로 fallback한다.
-같은 이름이 이미 있으면 -2, -3처럼 suffix를 붙인다.
-```
-
-## 13. 최종 저장
-
-회의록 생성이 끝난 시점의 로컬 날짜를 계산한다.
-
-```text
-saved_date = YYYY-MM-DD
-```
-
-그 날짜로 output 폴더를 만들고, 그 아래에 회의별 폴더를 만든다.
-
-```text
-~/minutes/output/YYYY-MM-DD/
-  회의-주제/
-```
-
-그리고 회의별 폴더 안에 같은 basename으로 파일들을 저장한다.
-
-```text
-~/minutes/output/YYYY-MM-DD/회의-주제/YYYY-MM-DD_회의-주제.mp4
-~/minutes/output/YYYY-MM-DD/회의-주제/YYYY-MM-DD_회의-주제.md
-~/minutes/output/YYYY-MM-DD/회의-주제/YYYY-MM-DD_회의-주제.docx
-~/minutes/output/YYYY-MM-DD/회의-주제/YYYY-MM-DD_회의-주제.transcript.txt
-~/minutes/output/YYYY-MM-DD/회의-주제/YYYY-MM-DD_회의-주제.transcript.json
-~/minutes/output/YYYY-MM-DD/회의-주제/YYYY-MM-DD_회의-주제.transcript.srt
-~/minutes/output/YYYY-MM-DD/회의-주제/YYYY-MM-DD_회의-주제.screen_text.txt
-~/minutes/output/YYYY-MM-DD/회의-주제/YYYY-MM-DD_회의-주제.screen_text.json
-~/minutes/output/YYYY-MM-DD/회의-주제/snapshots/
-```
-
-초기 구현에서는 원본 영상을 이동하지 않고 복사한다.
-
-```text
-~/remind/meeting_recording.mp4
-  ↓ copy
-~/minutes/output/2026-06-17/2026-06-17_신규-회의록-서비스-MVP-검토.mp4
-```
-
-## 14. 상태 관리
-
-각 job은 `status.json`을 가진다.
-
-처리 중 예시다.
-
-```json
-{
-  "status": "running",
-  "step": "transcribing",
-  "source": "~/remind/meeting_recording.mp4",
-  "started_at": "2026-06-17T14:30:00+09:00"
-}
-```
-
-완료 예시다.
-
-```json
-{
-  "status": "completed",
-  "source": "~/remind/meeting_recording.mp4",
-  "completed_at": "2026-06-17T14:45:12+09:00",
-  "output_dir": "~/minutes/output/2026-06-17",
-  "base_name": "2026-06-17_신규-회의록-서비스-MVP-검토"
-}
-```
-
-실패 예시다.
-
-```json
-{
-  "status": "failed",
-  "step": "summarize",
-  "error": "회의록 생성 실패 메시지",
-  "retryable": true
-}
-```
-
-상태 파일은 다음 용도로 사용한다.
-
-```text
-이미 완료된 파일 재처리 방지
-실패한 job 재시도
-실패 단계 확인
-진행률 표시를 위한 기반 데이터
-```
-
-## 15. 설정 파일
-
-repo에는 예시 설정 파일을 둔다.
-
-```text
-config.example.env
-```
-
-초기 예시는 다음과 같다.
+경로는 사용자 이름이나 clone 위치를 하드코딩하지 않는다.
 
 ```env
 MINUTES_HOME=~/minutes
 RECORDINGS_INBOX=~/remind
+```
+
+기본 구조는 다음과 같다.
+
+```text
+~/remind/                    기본 입력 위치
+~/minutes/
+  jobs/                      처리 근거, 상태, 재작업 자료
+  models/                    고정된 로컬 추론 모델
+  output/                    최종 전달물
+```
+
+`models/`에는 해시가 고정된 Silero ONNX를 한 번 준비한다. 영상마다 증가하지 않는다.
+
+입력 미디어의 이동 정책은 다음과 같다.
+
+- `RECORDINGS_INBOX` 바로 아래 파일은 분석 성공 후 job을 거쳐 최종 output으로 이동한다.
+  입력 위치에 중복본을 남기지 않는다.
+- inbox 밖의 파일을 직접 지정하면 원본을 보존하고 job 작업본만 최종 output으로 이동한다.
+- 분석이나 보관에 실패하면 원본을 잃지 않도록 이동을 완료하지 않거나 원래 job 위치로
+  복구한다.
+
+결과 날짜는 원본 파일명에 유효한 `YYYY-MM-DD`가 있으면 이를 우선하고, 없으면 미디어의
+수정 시각을 사용한다. 처리 완료일로 영상 날짜를 바꾸지 않는다.
+
+## 3. 전체 처리 흐름
+
+```text
+입력 파일 안정성 확인 또는 수동 경로 검증
+  → 단일 heavy-job 잠금과 job 생성
+  → ffmpeg 오디오 추출
+  → MLX Whisper 원문 언어 STT
+  → Silero ONNX 발화 존재 검증(`validate_speech_activity`)
+  → 영상이면 프레임 추출·로컬 OCR·Snapshot 선별
+  → STT/OCR/Snapshot 근거 기반 화자 판단
+  → 내용 inventory 작성
+  → 내용 기반 최종 Markdown 작성
+  → 내용 보존 audit와 선택적 공식 근거 확인
+  → DOCX 생성·렌더 검증
+  → 날짜와 H1 제목으로 최종 폴더 정리
+  → 임시 파일 정리와 완료 job 보존기간 적용
+```
+
+각 입력은 `~/minutes/jobs/<job_id>/`에서 독립적으로 처리한다. `status.json`은 현재 단계,
+실패 원인, 원본 경로, 최종 경로를 기록하고 `process_metrics.json`은 단계별 wall time,
+CPU time, 디스크 증감, 적용된 자원 정책을 기록한다.
+
+## 4. 오디오 추출과 STT
+
+`ffmpeg`는 입력에서 16 kHz mono PCM `audio.wav`를 한 번 추출한다. MLX Whisper
+`mlx-community/whisper-large-v3-turbo`가 Apple Silicon GPU/Metal 경로에서 이를 읽어
+시간 구간이 있는 `transcript.json`, `transcript.txt`, `transcript.srt`를 만든다.
+
+```env
 WHISPER_MODEL=mlx-community/whisper-large-v3-turbo
 WHISPER_DEVICE=gpu
 LANGUAGE=auto
-OUTPUT_LANGUAGE=ko
-DOCX_ENABLED=true
-AUDIO_SAMPLE_RATE=16000
-AUDIO_FFMPEG_THREADS=1
-AUDIO_CPU_LIMIT_PERCENT=60
-AUDIO_CPU_LIMIT_PERIOD_SECONDS=0.2
-AUDIO_CPU_LIMIT_FALLBACK_BURST_CORES=2.5
+HF_HUB_OFFLINE=1
+```
+
+Whisper 캐시는 모델별로 공유되며 영상마다 새로 다운로드하지 않는다.
+`HF_HUB_OFFLINE=1`인 실제 처리에서는 Hugging Face에 접속하거나 최신 리비전을 확인하지
+않는다. 새 PC에서는 신뢰한 네트워크에서 모델을 최초 한 번 준비한 뒤 오프라인 모드로
+처리한다.
+
+`audio.wav`는 STT가 성공하면 다시 만들 수 있는 임시파일이므로
+`CLEANUP_JOB_MEDIA_AFTER_ARCHIVE=true`일 때 즉시 제거한다. 오디오 추출과 STT 자체는
+화자분리 정책과 무관한 필수 단계다.
+
+## 5. 언어 정책
+
+```env
+LANGUAGE=auto
+OCR_LANGUAGES=auto
+OUTPUT_LANGUAGE=auto
+```
+
+- `LANGUAGE=auto`는 STT 입력 언어를 감지하고 전사를 원문 언어로 유지한다.
+- `OCR_LANGUAGES=auto`는 영어 입력에 `eng`, 한국어 입력에 `kor+eng`을 선택한다.
+- `OUTPUT_LANGUAGE=auto`는 최종 문서도 원문의 지배적인 언어로 작성한다.
+- 영어 원문을 한국어로 작성할 때만 `OUTPUT_LANGUAGE=ko`를 지정한다.
+- 최종 문서를 영어로 강제해야 할 때만 `OUTPUT_LANGUAGE=en`을 지정한다.
+
+번역이 필요해도 완성된 중간 문서를 만든 뒤 다시 번역하거나 재요약하지 않는다. 원문 STT와
+OCR 근거에서 목표 언어의 최종 문서를 직접 작성한다. 영어 입력과 한국어 입력은 오디오
+추출, STT 1회, OCR 1회라는 같은 파이프라인을 사용하며 언어 때문에 별도 화자분리나 추가
+전사 단계를 실행하지 않는다.
+
+## 6. 영상 OCR과 Snapshot
+
+영상은 기본 10초 간격으로 프레임을 추출한다. 로컬 Tesseract OCR 전에 화면 서명으로
+유사 프레임을 거르고, OCR 뒤에는 인접 중복 텍스트를 제거한다. 자막이나 플레이어 UI가
+화면 변화로 오인되지 않도록 기본적으로 하단 18%와 우측 20%를 시각 비교에서 제외한다.
+
+```env
 OCR_ENABLED=true
 OCR_FRAME_INTERVAL_SECONDS=10
-OCR_LANGUAGES=kor+eng
-OCR_MAX_CONTEXT_CHARS=12000
+OCR_LANGUAGES=auto
 OCR_FFMPEG_THREADS=1
+OCR_WORKERS=1
 OCR_TESSERACT_THREAD_LIMIT=1
-OCR_TESSERACT_NICE=10
-OCR_FRAME_PAUSE_SECONDS=0
 OCR_VISUAL_DEDUPE_ENABLED=true
-OCR_VISUAL_DEDUPE_IGNORE_BOTTOM_RATIO=0.18
-OCR_VISUAL_DEDUPE_IGNORE_RIGHT_RATIO=0.20
-OCR_VISUAL_DEDUPE_MAX_MEAN_DELTA=6.0
-OCR_FRAME_EXTRACT_CPU_LIMIT_PERCENT=80
-OCR_FRAME_EXTRACT_CPU_LIMIT_PERIOD_SECONDS=0.2
-OCR_FRAME_EXTRACT_CPU_LIMIT_FALLBACK_BURST_CORES=1.5
-OCR_SIGNATURE_CPU_LIMIT_PERCENT=0
-OCR_SIGNATURE_CPU_LIMIT_PERIOD_SECONDS=0.2
-OCR_SIGNATURE_CPU_LIMIT_FALLBACK_BURST_CORES=2.5
-OCR_TESSERACT_CPU_LIMIT_PERCENT=0
-OCR_TESSERACT_CPU_LIMIT_PERIOD_SECONDS=0.2
-OCR_TESSERACT_CPU_LIMIT_FALLBACK_BURST_CORES=2.5
-CLEANUP_JOB_OCR_IMAGES_AFTER_ARCHIVE=true
-WATCH_STABLE_SECONDS=15
-WATCH_POLL_SECONDS=5
-LLM_PROVIDER=openai
-OPENAI_API_KEY=
-OPENAI_MODEL=
-OCI_GENAI_MODEL=
-OCI_GENAI_COMPARTMENT_ID=
-OCI_GENAI_ENDPOINT=
-OCI_CONFIG_FILE=~/.oci/config
-OCI_PROFILE=DEFAULT
 ```
 
-사용자는 필요하면 `.env`로 복사해 조정한다.
+공개 설정의 `OCR_WORKERS=1`은 다양한 Mac에서 안전하게 시작하기 위한 기본값이다. 현재
+11-core M3 Pro 로컬 프로필은 다음 값을 사용한다.
+
+```env
+OCR_WORKERS=5
+OCR_TESSERACT_THREAD_LIMIT=1
+```
+
+서로 다른 프레임은 최대 5개 Tesseract 프로세스로 처리하되 각 프로세스의 OpenMP 내부
+스레드는 1개로 제한한다. 병렬 결과는 반드시 타임스탬프 순서로 다시 적용해 기존 화면·텍스트
+중복 제거 결과와 Snapshot 번호가 worker 수에 따라 달라지지 않게 한다.
+
+원본 `frames/`는 OCR 성공 후 제거한다. 의미 있는 선별 이미지만 job의 `snapshots/`에 두고
+최종 문서 확인과 보관까지 유지한다. Tesseract가 없거나 OCR이 실패해도 STT와 문서 생성은
+계속하며 실패 상태를 `screen_text.json`에 기록한다.
+
+## 7. 화자 판단 정책
+
+자동 처리 설정은 다음으로 고정한다.
+
+```env
+SPEAKER_ATTRIBUTION_MODE=evidence
+SPEAKER_ATTRIBUTION_REQUIRED=false
+SPEECH_ACTIVITY_VALIDATION_ENABLED=true
+```
+
+화자 이름은 시간 정보가 있는 STT, OCR, 필요한 소수의 선별 Snapshot을 함께 확인해 판단한다.
+이름이 표시된 자막이나 이름표도 발화 시점과 대응해야 하며, 참가자 목록·화면 공유자·단순히
+화면에 보이는 이름만으로 현재 화자를 확정하지 않는다. 특정 서비스, 초록색 테두리, 색상,
+고정 레이아웃을 화자 증거로 가정하지 않는다.
+
+화면 근거가 없으면 자기소개, 직접 호명 뒤 응답, 명확한 발언 인계 같은 STT 근거만 사용할
+수 있다. 근거가 약하거나 충돌하면 `화자 미상` 또는 `unknown speaker`로 남긴다. 화자명을
+모른다는 이유로 해당 발언 내용을 생략하지 않는다.
+
+SpeechBrain ECAPA/x-vector, pyannote를 이용한 별도 음향 화자분리는 화면 근거가
+충분하거나 부족한 경우 모두 자동 실행하지 않는다. Silero ONNX는 발화 존재 검증만 한다. `audio`, `hybrid`, 강제 화자 수,
+`SPEAKER_ATTRIBUTION_REQUIRED=true`는 거부한다. 완료 job의
+`speaker_attribution_report.json`에는
+`local_audio_diarization=disabled_by_policy`가 기록되어야 하며,
+`process_metrics.json`에는 `diarize` 또는 `attribute_speakers` 단계가 없어야 한다.
+
+## 8. 문서 생성과 내용 보존
+
+Codex 모드의 현재 로컬 품질 설정은 다음과 같다.
+
+```env
+LLM_PROVIDER=codex
+CONTENT_AUDIT_MODE=strict
+OFFICIAL_SOURCE_VERIFICATION=auto
+```
+
+최종 H1, 문서 유형, H2/H3 구조는 파일명이나 플랫폼이 아니라 실제 내용을 바탕으로 정한다.
+최종 문서는 영상에서 전달된 내용을 기본적으로 그대로 보존하고, 인사·말버릇·의미가 완전히
+같은 반복만 축약할 수 있다.
+
+`strict` 모드는 문서 작성 전에 `content_inventory.json`, 작성 후
+`content_audit.json`을 요구한다. 날짜, 버전, 수치, 범위, 단위, 조건, 예외, 부정 표현,
+제한, 위험, 질의응답, STT/OCR 충돌을 추적한다. 원문이 한 context보다 길면 타임스탬프
+순서로 읽어 하나의 누적 inventory에 추가한다. 구간별 축약본을 만든 뒤 다시 요약하는
+손실성 병합은 하지 않는다. 감사가 통과하기 전에는 최종 보관하지 않는다.
+
+녹음된 내용은 무엇이 말해졌는지를 판단하는 기준이다. STT와 OCR이 모호하거나 충돌하면
+먼저 주변 음성 문맥과 Snapshot을 확인한다. 그래도 제품명, 버전, 정책, API 동작 등이
+불분명할 때만 최신 공식 문서, 공식 release note, service announcement, 표준 원문 또는
+upstream 보안 권고를 조사한다. 공식 정보가 영상 발언과 다르더라도 영상 내용을 조용히
+바꾸지 않는다.
+
+외부 근거를 사용하면 최종 문서 맨 아래에 한국어는 `## 외부 근거 확인`, 영어는
+`## External Evidence Check`를 추가한다. 전사·OCR 보강 근거와 영상 내용에 상충하는
+근거를 구분하고 timestamp, 조사 목적, 공식 확인 결과, 확인일, 링크를 기록한다. 그 뒤에
+다른 H2를 추가하지 않는다.
+
+## 9. DOCX 계약
+
+Markdown H1을 표지 제목과 최종 폴더명·파일명에 사용한다. DOCX에는 내용 기반 표지,
+본문과 같은 번호를 가진 정적 목차, 일치하는 bookmark와 내부 링크, 언어별 스타일,
+명시적인 표 너비, 반복 표 머리글, 가능한 범위의 행 분할 방지, 바닥글 페이지 번호가 있어야
+한다.
+
+macOS Codex sandbox에서 `soffice`를 직접 시험 실행하지 않는다. 반복되는 LibreOffice crash
+dialog를 막기 위해 다음 guard를 처음부터 sandbox 밖의 허용된 실행으로 사용한다.
 
 ```bash
-cp config.example.env .env
+python scripts/render_docx_checked.py \
+  "/absolute/path/to/final.docx" \
+  --output_dir /private/tmp/minutes-docx-render \
+  --emit_pdf
 ```
 
-## 16. git 관리 기준
+렌더링한 모든 페이지에서 표지, 목차 번호와 링크, 표, 마지막 페이지를 확인한다.
 
-repo에 포함하는 파일은 실행 코드와 문서, 설정 예시다.
+## 10. 최종 산출물과 보존주기
+
+최종 폴더는 다음 형식이다.
 
 ```text
-scripts/
-README.md
-requirements.txt
-config.example.env
-PLAN.md
+~/minutes/output/YYYY-MM-DD/
+  내용-기반-제목/
+    YYYY-MM-DD_내용-기반-제목.mov 또는 YYYY-MM-DD_내용-기반-제목.m4a
+    YYYY-MM-DD_내용-기반-제목.md
+    YYYY-MM-DD_내용-기반-제목.docx
+    snapshots/
+      snapshot_0001_00-00-00.jpg
 ```
 
-회의 영상, 녹음 파일, 추출 오디오, 전사 결과, 회의록 결과, job 작업 파일은 `MINUTES_HOME` 아래에 저장한다.
+최종 폴더에는 이름을 변경한 미디어, Markdown 하나, DOCX 하나, 의미 있는 Snapshot만 둔다.
+transcript, OCR JSON/TXT, 화자 근거 보고서, inventory, audit, 상태, 로그, metrics는
+`jobs/<job_id>/`에만 둔다. `.DS_Store`는 macOS Finder가 다시 만들 수 있는 메타데이터이며
+프로젝트 산출물이나 Git 추적 대상이 아니다.
 
-## 17. MVP 완료 기준
-
-MVP는 아래 조건이 모두 충족되면 완료로 본다.
-
-```text
-1. git clone 후 설치하면 바로 실행할 수 있다.
-2. 기본 입력 위치가 ~/remind로 잡힌다.
-3. MINUTES_HOME 환경변수로 저장 위치를 바꿀 수 있다.
-4. RECORDINGS_INBOX 환경변수로 입력 위치를 바꿀 수 있다.
-5. ~/remind에 영상 또는 녹음 파일을 넣을 수 있다.
-6. 파일 저장 완료를 감지한다.
-7. ~/minutes/jobs/<job_id>를 만든다.
-8. ffmpeg로 audio.wav를 만든다.
-9. mlx-whisper로 transcript.json/txt/srt를 만든다.
-10. OCR이 활성화되어 있으면 10초 간격 프레임 추출과 screen_text.json/txt 및 snapshots 생성을 시도한다.
-11. LLM_PROVIDER 설정에 따라 OpenAI API 또는 OCI GenAI API로 회의록 생성을 요청한다.
-12. transcript와 screen_text 기반으로 minutes.raw.json을 만든다.
-13. minutes.md와 minutes.docx를 한국어 회의록으로 만든다.
-14. 저장 시점 날짜로 ~/minutes/output/YYYY-MM-DD 폴더를 만들고 그 안에 입력 파일별 폴더를 만든다.
-15. 원본 영상/녹음, Markdown/DOCX 회의록, 전사 파일, OCR 파일, snapshot 폴더를 입력 파일별 폴더에 저장한다. OCR 파일과 snapshot은 영상 입력에서만 의미 있는 내용을 가진다.
-16. status.json에 완료 상태를 기록한다.
-17. 이미 처리한 파일은 재처리하지 않는다.
+```env
+CLEANUP_JOB_OCR_IMAGES_AFTER_ARCHIVE=true
+CLEANUP_JOB_MEDIA_AFTER_ARCHIVE=true
+COMPLETED_JOB_RETENTION_HOURS=24
 ```
 
-## 18. 개발 단계
+완료 job은 재작업을 위해 기본 24시간 보관한다. 다음 처리 또는 아카이브 시 만료된 완료
+job의 최종 미디어, Markdown, 선택적 DOCX와 Snapshot 존재 여부와 output 경로 안전성을
+검증한 뒤 job 폴더 전체를 삭제한다. 실패, 진행 중, Codex 입력 대기 job과 `jobs/index.json`,
+`.process.lock`은 자동 삭제하지 않는다.
 
-### Phase 1. 기본 경로와 단일 파일 STT
+## 11. CPU와 성능 정책
 
-목표는 git clone 후 `~/minutes`를 기준으로 단일 영상 또는 녹음 파일 전사를 수행하는 것이다.
+자원 제한은 Mac 전체의 전역 설정이 아니라 이 프로젝트 프로세스와 자식 프로세스에만
+적용한다. 다른 프로젝트의 QoS나 nice 값을 변경하지 않는다. watcher와 수동 실행을 합쳐
+무거운 job은 한 번에 하나만 실행한다.
 
-작업 항목은 다음과 같다.
-
-```text
-MINUTES_HOME 경로 처리
-RECORDINGS_INBOX 경로 처리
-기본 폴더 자동 생성
-ffmpeg 설치 확인
-mp4/mkv/mov 입력 처리
-audio.wav 추출
-mlx-whisper 전사
-transcript.json/txt/srt 저장
+```env
+PROCESS_QOS=utility
+PROCESS_NICE=10
+AUDIO_FFMPEG_THREADS=1
+AUDIO_CPU_LIMIT_PERCENT=60
+OCR_FFMPEG_THREADS=1
+OCR_FRAME_EXTRACT_CPU_LIMIT_PERCENT=80
+OCR_WORKERS=5
+OCR_TESSERACT_THREAD_LIMIT=1
+OCR_TESSERACT_NICE=10
 ```
 
-완료 기준은 다음과 같다.
+CPU limit 값은 Mac 전체 사용률의 정밀한 hard cap이 아니라 해당 외부 프로세스의 평균
+부하를 낮추는 duty-cycle 근사값이다. MLX Whisper는 GPU/Metal 경로라 이 CPU 백분율
+제한의 직접 대상이 아니다.
 
-```text
-~/minutes/jobs/<job_id>/transcript.txt 생성
-10분 이상 회의 영상 또는 녹음 파일 전사 성공
+28분 36초 한국어 영상의 동일한 172개 프레임으로 검증한 결과는 다음과 같다.
+
+- 1-worker 기준 OCR: 290.169초
+- 5-worker OCR: 248.646초
+- 단축: 41.5초, 14.3%
+- 선별 Snapshot: 두 실행 모두 50개
+- timestamp, source frame, OCR text: 완전 일치
+- 전체 시스템 CPU: 평균 23.9%, p95 51.8%, 최대 69.1%
+- 동시 OCR 프로세스 최대: 5
+
+이 측정에서 70%는 5→6 worker 비교 여부를 정하기 위한 일회성 중단 기준이었다. 스킬이나
+일반 런타임의 CPU 상한이 아니며, 실행 중 CPU 사용률로 worker 수를 자동 조정하는 로직도
+없다. 실제 처리는 `.env`의 `OCR_WORKERS` 명시값을 그대로 사용한다. 가장 큰 잔여 병목은
+OCR worker가 아니라 duty-cycle이 적용된 프레임 추출 약 221.6초다. 이후 최적화는
+hardware decode 또는 프레임 추출 방식의 동등성과 자원 사용량을 별도 검증한 뒤 명시적인
+설정 변경으로 적용한다.
+
+## 12. 네트워크와 보안 경계
+
+ffmpeg, MLX Whisper, Tesseract OCR과 표준 화자 근거 처리는 로컬에서 실행한다. 미디어,
+전사, OCR, Snapshot은 사용자가 선택한 LLM provider 외부로는 보내지 않는다. Codex가 최신
+공식 근거를 검색할 때도 공개 제품명, 버전, 일반화한 정책 검색어만 사용하며 원문 STT/OCR,
+Snapshot, 참석자·고객 이름, 내부 식별자, 비밀정보를 검색 서비스로 보내지 않는다.
+
+표준 `process_file.py` 경로는 로컬의 해시 검증된 Silero ONNX만 발화 존재 검증에 사용한다.
+ECAPA·pyannote·사용자 제공 `.pkl`, `.joblib`, `.ckpt`, `.pt` 모델은 로드하지 않는다.
+세부 버전·해시·라이선스 정책은 `SECURITY.md`를 따른다.
+
+## 13. 공개 기본값과 현재 로컬 프로필
+
+`config.example.env`는 새 clone과 다양한 Mac을 위한 보수적 기본값을 제공한다.
+
+```env
+OUTPUT_LANGUAGE=auto
+CONTENT_AUDIT_MODE=off
+OFFICIAL_SOURCE_VERIFICATION=off
+OCR_WORKERS=1
+OCR_TESSERACT_THREAD_LIMIT=1
+COMPLETED_JOB_RETENTION_HOURS=24
 ```
 
-### Phase 2. OCR 처리
+현재 검증된 로컬 `.env`는 품질 감사와 공식 근거 확인을 활성화하고 M3 Pro 측정값을 적용한다.
 
-목표는 화면 공유 텍스트를 회의록 생성 입력에 보조 근거로 포함하는 것이다.
-
-작업 항목은 다음과 같다.
-
-```text
-OCR 설정 처리
-10초 간격 프레임 추출
-tesseract OCR 실행
-인접 중복 텍스트 제거
-screen_text.json/txt 저장
-OCR 실패 시 STT 파이프라인 계속 진행
+```env
+LLM_PROVIDER=codex
+OUTPUT_LANGUAGE=auto
+CONTENT_AUDIT_MODE=strict
+OFFICIAL_SOURCE_VERIFICATION=auto
+OCR_WORKERS=5
+OCR_TESSERACT_THREAD_LIMIT=1
 ```
 
-완료 기준은 다음과 같다.
+두 설정의 차이는 문서 불일치가 아니다. 공개 기본값은 외부 검색을 자동으로 시작하지 않고
+낮은 CPU에서 출발하며, 현재 로컬 프로필은 사용자가 합의한 품질과 성능 설정이다.
 
-```text
-~/minutes/jobs/<job_id>/screen_text.json 생성
-최종 output 폴더에 screen_text.json/txt 복사
+## 14. 검증과 완료 기준
+
+변경 후 최소 검증은 다음과 같다.
+
+```bash
+.venv/bin/python -m py_compile scripts/*.py
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
-### Phase 3. LLM provider와 Markdown 회의록 생성
+실제 미디어 처리 완료 기준은 다음과 같다.
 
-목표는 `transcript.txt`에서 회의록 Markdown을 만드는 것이다.
+1. STT와 영상 OCR이 원문 언어로 한 번씩 실행된다.
+2. 로컬 음향 화자분리 산출물이나 단계가 없다.
+3. 근거 없는 화자 이름이나 강제 화자 수가 없다.
+4. 내용 inventory와 audit이 필수 사실의 누락·변형 없이 통과한다.
+5. 외부 공식 근거가 영상 발언을 덮어쓰지 않고 마지막 부록에 분리된다.
+6. H1과 문서 유형·섹션이 실제 내용에서 결정된다.
+7. DOCX 목차 번호·본문 번호·bookmark 링크가 일치한다.
+8. 최종 폴더에는 미디어, MD, DOCX, 의미 있는 Snapshot만 있다.
+9. inbox 바로 아래 원본은 성공 후 중복 없이 이동되고 외부 원본은 보존된다.
+10. `process_metrics.json`에 worker, CPU 정책, 단계별 시간과 디스크 증감이 기록된다.
+11. 완료 job은 24시간 후 최종 산출물 검증을 통과한 경우에만 정리된다.
 
-작업 항목은 다음과 같다.
-
-```text
-LLM_PROVIDER 설정 처리
-OpenAI provider 구현
-OCI GenAI provider 구현
-한국어 출력 프롬프트 고정
-회의록 프롬프트 작성
-회의 제목 추출
-minutes.raw.json 생성
-minutes.md 렌더링
-긴 전사 chunk 처리
-```
-
-완료 기준은 다음과 같다.
-
-```text
-회의 요약, 결정사항, 액션 아이템, 논의 상세, 확인 필요 사항이 포함된 md 생성
-```
-
-### Phase 4. 최종 저장 구조
-
-목표는 결과물을 `~/minutes/output/YYYY-MM-DD`에 정리하는 것이다.
-
-작업 항목은 다음과 같다.
-
-```text
-저장 시점 날짜 계산
-회의 제목 기반 basename 생성
-파일명 안전화
-원본 파일 복사
-md/transcript 파일 복사
-파일명 충돌 처리
-```
-
-완료 기준은 다음과 같다.
-
-```text
-날짜 폴더 아래 회의별 폴더에서 원본 파일과 회의록, 전사 파일을 함께 확인할 수 있음
-```
-
-### Phase 5. Watcher 자동화
-
-목표는 `~/remind`에 파일이 들어오면 자동 처리하는 것이다.
-
-작업 항목은 다음과 같다.
-
-```text
-폴더 감시
-파일 생성 완료 감지
-job_id 생성
-status.json 기록
-중복 처리 방지
-실패 로그 저장
-```
-
-완료 기준은 다음과 같다.
-
-```text
-새 영상 또는 녹음 파일이 들어오면 자동으로 output 날짜 폴더까지 생성됨
-```
-
-## 19. 최종 요약
-
-현재 설계는 다음 한 줄로 정리된다.
-
-```text
-~/remind에 영상 또는 녹음 파일을 넣으면,
-로컬에서 전사와 회의록 생성이 끝난 뒤,
-~/minutes/output/YYYY-MM-DD에 영상과 회의록이 함께 정리된다.
-```
-
-최종 결과물 예시는 다음과 같다.
-
-```text
-~/minutes/output/2026-06-17/
-  2026-06-17_신규-회의록-서비스-MVP-검토.mp4
-  2026-06-17_신규-회의록-서비스-MVP-검토.md
-  2026-06-17_신규-회의록-서비스-MVP-검토.transcript.txt
-  2026-06-17_신규-회의록-서비스-MVP-검토.transcript.json
-  2026-06-17_신규-회의록-서비스-MVP-검토.transcript.srt
-  2026-06-17_신규-회의록-서비스-MVP-검토.screen_text.txt
-  2026-06-17_신규-회의록-서비스-MVP-검토.screen_text.json
-```
+위 계약을 변경할 때는 코드, 설정 예시, README, 설치 가이드, 보안 문서, 저장소 스킬과
+문서 계약 테스트를 같은 변경에서 함께 갱신한다.

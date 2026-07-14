@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 import mlx_whisper
+import numpy as np
 
 from scripts.config import Settings
 from scripts.cpu_limit import run_limited
+from scripts.audio_io import load_pcm_wav
 from scripts.utils import format_timestamp
 
 
@@ -17,6 +18,10 @@ def extract_audio(video_path: Path, audio_path: Path, settings: Settings) -> Non
         [
             "ffmpeg",
             "-y",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
             "-threads",
             str(settings.audio_ffmpeg_threads),
             "-i",
@@ -26,6 +31,10 @@ def extract_audio(video_path: Path, audio_path: Path, settings: Settings) -> Non
             "1",
             "-ar",
             str(settings.audio_sample_rate),
+            "-c:a",
+            "pcm_s16le",
+            "-threads:a",
+            str(settings.audio_ffmpeg_threads),
             str(audio_path),
         ],
         cpu_limit_percent=settings.audio_cpu_limit_percent,
@@ -35,15 +44,29 @@ def extract_audio(video_path: Path, audio_path: Path, settings: Settings) -> Non
     )
 
 
-def transcribe_audio(audio_path: Path, transcript_path: Path, settings: Settings) -> dict:
+def transcribe_audio(
+    audio_path: Path,
+    transcript_path: Path,
+    settings: Settings,
+    *,
+    waveform: np.ndarray | None = None,
+) -> dict:
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     configure_mlx_device(settings.whisper_device)
+    if waveform is None:
+        waveform, _sample_rate = load_pcm_wav(
+            audio_path,
+            expected_sample_rate=getattr(settings, "audio_sample_rate", None),
+        )
     transcribe_kwargs = {
         "path_or_hf_repo": settings.whisper_model,
     }
     if settings.language and settings.language.lower() != "auto":
         transcribe_kwargs["language"] = settings.language
-    result = mlx_whisper.transcribe(str(audio_path), **transcribe_kwargs)
+    speaker_mode = getattr(settings, "speaker_attribution_mode", "off")
+    result = mlx_whisper.transcribe(waveform, **transcribe_kwargs)
+    if speaker_mode == "evidence":
+        result["timing_precision"] = "segment"
     transcript_path.write_text(
         json.dumps(result, ensure_ascii=False, indent=2),
         encoding="utf-8",
