@@ -34,15 +34,33 @@ class ConfigTests(unittest.TestCase):
             / "models"
             / "silero-vad-6.2.1",
         )
+        self.assertEqual(
+            settings.community1_approval_path,
+            Path(temp_dir)
+            / "minutes"
+            / "governance"
+            / "pyannote-community1-approval.json",
+        )
+        self.assertEqual(
+            settings.community1_model_dir,
+            Path(temp_dir) / "minutes" / "models" / "pyannote-community1",
+        )
         self.assertEqual(settings.process_qos, "utility")
         self.assertEqual(settings.process_nice, 10)
         self.assertTrue(settings.cleanup_job_media_after_archive)
-        self.assertEqual(settings.completed_job_retention_hours, 24)
+        self.assertEqual(settings.completed_job_retention_hours, 0)
         self.assertEqual(settings.output_language, "auto")
         self.assertEqual(settings.content_audit_mode, "off")
         self.assertEqual(settings.official_source_verification, "off")
         self.assertEqual(settings.ocr_languages, "auto")
-        self.assertEqual(settings.ocr_workers, 1)
+        self.assertEqual(settings.ocr_frame_interval_seconds, 5)
+        self.assertEqual(settings.ocr_ffmpeg_threads, 4)
+        self.assertEqual(settings.ocr_workers, 5)
+        self.assertEqual(settings.ocr_max_snapshot_gap_seconds, 120)
+        self.assertEqual(settings.ocr_visual_only_min_mean_delta, 12.0)
+        self.assertEqual(settings.ocr_frame_extract_cpu_limit_percent, 0)
+        self.assertEqual(settings.ocr_tesseract_nice, 0)
+        self.assertFalse(settings.cleanup_job_ocr_images_after_archive)
         self.assertFalse(hasattr(settings, "huggingface_token"))
         self.assertNotIn("HF_TOKEN", requested_secrets)
 

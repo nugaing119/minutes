@@ -78,6 +78,8 @@ class Settings:
     speaker_attribution_required: bool
     speech_activity_validation_enabled: bool
     vad_model_dir: Path
+    community1_approval_path: Path
+    community1_model_dir: Path
     process_qos: str
     process_nice: int
     docx_enabled: bool
@@ -99,6 +101,8 @@ class Settings:
     ocr_visual_dedupe_ignore_bottom_ratio: float
     ocr_visual_dedupe_ignore_right_ratio: float
     ocr_visual_dedupe_max_mean_delta: float
+    ocr_max_snapshot_gap_seconds: int
+    ocr_visual_only_min_mean_delta: float
     ocr_frame_extract_cpu_limit_percent: int
     ocr_frame_extract_cpu_limit_period_seconds: float
     ocr_frame_extract_cpu_limit_fallback_burst_cores: float
@@ -192,6 +196,14 @@ def load_settings() -> Settings:
             True,
         ),
         vad_model_dir=expected_model_dir(minutes_home),
+        community1_approval_path=_path_from_env(
+            "COMMUNITY1_APPROVAL_PATH",
+            str(minutes_home / "governance" / "pyannote-community1-approval.json"),
+        ),
+        community1_model_dir=_path_from_env(
+            "COMMUNITY1_MODEL_DIR",
+            str(minutes_home / "models" / "pyannote-community1"),
+        ),
         process_qos=_choice_from_env(
             "PROCESS_QOS",
             "utility",
@@ -214,13 +226,13 @@ def load_settings() -> Settings:
             _float_from_env("CPU_LIMIT_FALLBACK_BURST_CORES", 2.5),
         ),
         ocr_enabled=_bool_from_env("OCR_ENABLED", True),
-        ocr_frame_interval_seconds=_int_from_env("OCR_FRAME_INTERVAL_SECONDS", 10),
+        ocr_frame_interval_seconds=_int_from_env("OCR_FRAME_INTERVAL_SECONDS", 5),
         ocr_languages=os.environ.get("OCR_LANGUAGES", "auto").strip().lower(),
         ocr_max_context_chars=_int_from_env("OCR_MAX_CONTEXT_CHARS", 12_000),
-        ocr_ffmpeg_threads=_int_from_env("OCR_FFMPEG_THREADS", 1),
-        ocr_workers=_bounded_int_from_env("OCR_WORKERS", 1, 1, 16),
+        ocr_ffmpeg_threads=_int_from_env("OCR_FFMPEG_THREADS", 4),
+        ocr_workers=_bounded_int_from_env("OCR_WORKERS", 5, 1, 16),
         ocr_tesseract_thread_limit=_int_from_env("OCR_TESSERACT_THREAD_LIMIT", 1),
-        ocr_tesseract_nice=_int_from_env("OCR_TESSERACT_NICE", 10),
+        ocr_tesseract_nice=_int_from_env("OCR_TESSERACT_NICE", 0),
         ocr_frame_pause_seconds=_float_from_env("OCR_FRAME_PAUSE_SECONDS", 0.0),
         ocr_visual_dedupe_enabled=_bool_from_env("OCR_VISUAL_DEDUPE_ENABLED", True),
         ocr_visual_dedupe_ignore_bottom_ratio=_float_from_env(
@@ -235,9 +247,19 @@ def load_settings() -> Settings:
             "OCR_VISUAL_DEDUPE_MAX_MEAN_DELTA",
             6.0,
         ),
+        ocr_max_snapshot_gap_seconds=_bounded_int_from_env(
+            "OCR_MAX_SNAPSHOT_GAP_SECONDS",
+            120,
+            10,
+            3600,
+        ),
+        ocr_visual_only_min_mean_delta=_float_from_env(
+            "OCR_VISUAL_ONLY_MIN_MEAN_DELTA",
+            12.0,
+        ),
         ocr_frame_extract_cpu_limit_percent=_int_from_env(
             "OCR_FRAME_EXTRACT_CPU_LIMIT_PERCENT",
-            _int_from_env("OCR_CPU_LIMIT_PERCENT", 80),
+            _int_from_env("OCR_CPU_LIMIT_PERCENT", 0),
         ),
         ocr_frame_extract_cpu_limit_period_seconds=_float_from_env(
             "OCR_FRAME_EXTRACT_CPU_LIMIT_PERIOD_SECONDS",
@@ -273,7 +295,7 @@ def load_settings() -> Settings:
         ),
         cleanup_job_ocr_images_after_archive=_bool_from_env(
             "CLEANUP_JOB_OCR_IMAGES_AFTER_ARCHIVE",
-            True,
+            False,
         ),
         cleanup_job_media_after_archive=_bool_from_env(
             "CLEANUP_JOB_MEDIA_AFTER_ARCHIVE",
@@ -281,7 +303,7 @@ def load_settings() -> Settings:
         ),
         completed_job_retention_hours=_bounded_int_from_env(
             "COMPLETED_JOB_RETENTION_HOURS",
-            24,
+            0,
             0,
             8760,
         ),

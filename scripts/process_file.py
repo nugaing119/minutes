@@ -120,11 +120,22 @@ def _process_file(media_path: Path, settings: Settings) -> Path:
         "qos": getattr(settings, "process_qos", "utility"),
         "nice": getattr(settings, "process_nice", 10),
         "single_job": True,
-        "ocr_workers": getattr(settings, "ocr_workers", 1),
+        "ocr_workers": getattr(settings, "ocr_workers", 5),
+        "ocr_ffmpeg_threads": getattr(settings, "ocr_ffmpeg_threads", 4),
         "ocr_tesseract_thread_limit": getattr(
             settings,
             "ocr_tesseract_thread_limit",
             1,
+        ),
+        "ocr_frame_extract_cpu_limit_percent": getattr(
+            settings,
+            "ocr_frame_extract_cpu_limit_percent",
+            0,
+        ),
+        "ocr_tesseract_nice_increment": getattr(
+            settings,
+            "ocr_tesseract_nice",
+            0,
         ),
         "speaker_evidence_policy": "stt_ocr_selected_snapshots",
         "local_audio_diarization": "disabled_by_policy",
@@ -142,6 +153,7 @@ def _process_file(media_path: Path, settings: Settings) -> Path:
     metrics_stage_cpu = _cpu_seconds()
     metrics_stages: list[dict[str, object]] = []
     intermediate_cleanup: dict[str, object] = {}
+    ocr_metrics: dict[str, object] = {}
     peak_observed_job_bytes = 0
 
     def finish_metrics_stage() -> None:
@@ -183,7 +195,7 @@ def _process_file(media_path: Path, settings: Settings) -> Path:
         write_json(
             metrics_path,
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "job_id": job_id,
                 "source": str(source),
                 "state": state,
@@ -195,6 +207,7 @@ def _process_file(media_path: Path, settings: Settings) -> Path:
                 ),
                 "resource_policy": resource_policy,
                 "stages": metrics_stages,
+                "ocr": ocr_metrics,
                 "intermediate_cleanup": intermediate_cleanup,
                 "peak_observed_job_bytes": peak_observed_job_bytes,
                 "cpu_metric_note": (
@@ -316,6 +329,9 @@ def _process_file(media_path: Path, settings: Settings) -> Path:
                     settings,
                     detected_language=str(transcript_result.get("language", "")),
                 )
+                runtime_metrics = ocr_result.get("metrics", {})
+                if isinstance(runtime_metrics, dict):
+                    ocr_metrics.update(runtime_metrics)
                 record_intermediate_cleanup(
                     "ocr_raw_frames",
                     {
@@ -339,6 +355,21 @@ def _process_file(media_path: Path, settings: Settings) -> Path:
                         "enabled": settings.ocr_enabled,
                         "status": "failed",
                         "error": str(ocr_error),
+                        "frames": [],
+                    },
+                )
+                write_json(
+                    job_dir / "evidence_coverage.json",
+                    {
+                        "schema_version": 1,
+                        "status": "failed",
+                        "coverage_passed": False,
+                        "error": str(ocr_error)[:500],
+                        "raw_frame_count": 0,
+                        "selected_snapshot_count": 0,
+                        "accounted_frame_count": 0,
+                        "accounting_complete": False,
+                        "reason_counts": {},
                         "frames": [],
                     },
                 )

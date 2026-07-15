@@ -293,7 +293,8 @@ class ProcessFileRegressionTests(unittest.TestCase):
                 metrics["resource_policy"]["local_audio_diarization"],
                 "disabled_by_policy",
             )
-            self.assertEqual(metrics["resource_policy"]["ocr_workers"], 1)
+            self.assertEqual(metrics["resource_policy"]["ocr_workers"], 5)
+            self.assertEqual(metrics["resource_policy"]["ocr_ffmpeg_threads"], 4)
             self.assertEqual(
                 metrics["resource_policy"]["ocr_tesseract_thread_limit"],
                 1,
@@ -494,7 +495,11 @@ class ProcessFileRegressionTests(unittest.TestCase):
                 output_dir = process_file(source)
 
             self.assertFalse(source.exists())
-            self.assertEqual(output_dir.parent.name, "2026-02-12")
+            self.assertEqual(output_dir.parent, settings.output_dir)
+            self.assertEqual(
+                output_dir.name,
+                "2026-02-12_MySQL-HeatWave-운영-정책",
+            )
             self.assertTrue(
                 (output_dir / "2026-02-12_MySQL-HeatWave-운영-정책.mov").exists()
             )
