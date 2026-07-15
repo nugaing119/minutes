@@ -1,6 +1,6 @@
 interface:
   display_name: "Local Media Documentation"
   short_description: "Local STT, OCR, and evidence-based documents"
-  default_prompt: "Use $minutes to process a local video or audio file, then complete the prepared job in a fresh isolated Codex context as a content-driven Markdown and DOCX document."
+  default_prompt: "Use $minutes to process local media, freeze source-language content once, add one low-reasoning translation-only turn only when the requested language differs, then create and verify the DOCX in a separate delivery phase."
 policy:
   allow_implicit_invocation: false

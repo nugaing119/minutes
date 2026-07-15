@@ -30,11 +30,12 @@ class DocumentationContractTests(unittest.TestCase):
             "SPEAKER_ATTRIBUTION_MODE=evidence",
             "SPEAKER_ATTRIBUTION_REQUIRED=false",
             "SPEECH_ACTIVITY_VALIDATION_ENABLED=true",
-            "COMPLETED_JOB_RETENTION_HOURS",
+            "COMPLETED_JOB_RETENTION_HOURS=0",
             "OCR_WORKERS",
             "OCR_TESSERACT_THREAD_LIMIT=1",
             "run_fresh_codex_job.py",
             "codex exec --ephemeral",
+            "translation_manifest.json",
         )
 
         for relative_path, content in self.primary_docs.items():
@@ -59,10 +60,37 @@ class DocumentationContractTests(unittest.TestCase):
             "CONTENT_AUDIT_MODE=strict",
             "OFFICIAL_SOURCE_VERIFICATION=auto",
             "OCR_WORKERS=5",
+            "OCR_FRAME_INTERVAL_SECONDS=5",
+            "OCR_FFMPEG_THREADS=4",
+            "OCR_FRAME_EXTRACT_CPU_LIMIT_PERCENT=0",
+            "OCR_TESSERACT_NICE=0",
+            "OCR_MAX_SNAPSHOT_GAP_SECONDS=120",
+            "CLEANUP_JOB_OCR_IMAGES_AFTER_ARCHIVE=false",
+            "COMPLETED_JOB_RETENTION_HOURS=0",
             "local_audio_diarization=disabled_by_policy",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.plan)
+
+    def test_docs_require_traceable_video_and_docx_evidence(self) -> None:
+        for relative_path, content in self.primary_docs.items():
+            with self.subTest(path=relative_path):
+                self.assertIn("evidence_coverage.json", content)
+                self.assertIn("docx_qa.json", content)
+                self.assertIn(
+                    "~/minutes/output/YYYY-MM-DD_내용-기반-제목/",
+                    content,
+                )
+                self.assertNotIn("~/minutes/output/YYYY-MM-DD/", content)
+                self.assertNotIn(
+                    "YYYY-MM-DD_내용-기반-제목.docx\n  docx_qa.json",
+                    content,
+                )
+
+        for content in self.primary_docs.values():
+            self.assertNotIn("OCR_FRAME_EXTRACT_CPU_LIMIT_PERCENT=80", content)
+            self.assertNotIn("OCR_TESSERACT_NICE=10", content)
+            self.assertNotIn("CLEANUP_JOB_OCR_IMAGES_AFTER_ARCHIVE=true", content)
 
     def test_skill_does_not_encode_a_machine_specific_cpu_threshold(self) -> None:
         skill = self.primary_docs["codex/skills/minutes/SKILL.md"]
@@ -111,8 +139,73 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn('"parent_conversation_inherited": False', launcher)
         self.assertIn('"raw_evidence_embedded_in_handoff": False', launcher)
         self.assertIn("must not launch", skill)
-        self.assertIn("reads the complete `codex_minutes_input.md`", skill)
+        self.assertIn("content_freeze.json", skill)
+        self.assertIn("translation_manifest.json", skill)
+        self.assertIn("translation defaults to `low`", skill)
+        self.assertIn("Raw evidence is available only", skill)
+        self.assertIn("delivery worker must", skill)
+        self.assertIn("evidence_chunks.json", skill)
         self.assertIn("Codex LLM provider에 노출될 수 있다", security)
+
+    def test_strict_fresh_jobs_require_ultra_derived_quality_artifacts(self) -> None:
+        skill = self.primary_docs["codex/skills/minutes/SKILL.md"]
+        quality_reference = (
+            REPO_ROOT / "codex/skills/minutes/references/quality-loop.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("references/quality-loop.md", skill)
+        self.assertIn("evidence_ledger.json", skill)
+        self.assertIn("document_blueprint.json", skill)
+        self.assertIn("content_quality_review.json", skill)
+        self.assertIn("overcompression", quality_reference)
+        self.assertIn("content_freeze.json", quality_reference)
+        self.assertIn("schema_version=3", quality_reference)
+        self.assertIn("model-judged", quality_reference)
+        self.assertIn("blocking_defect_code", quality_reference)
+        self.assertIn("review_cycles", quality_reference)
+        self.assertIn("translation-only turn", quality_reference)
+        self.assertIn("do not summarize, fact-check, add, omit, restructure", quality_reference)
+
+    def test_docs_do_not_restore_expensive_direct_target_synthesis_or_retention(self) -> None:
+        for relative_path, content in self.primary_docs.items():
+            with self.subTest(path=relative_path):
+                self.assertNotIn("COMPLETED_JOB_RETENTION_HOURS=24", content)
+                self.assertNotIn("목표 언어의 최종 문서를 직접 작성", content)
+                self.assertNotIn("direct Korean synthesis", content)
+
+    def test_docx_delivery_is_content_frozen_and_bounded(self) -> None:
+        skill = self.primary_docs["codex/skills/minutes/SKILL.md"]
+        quality_reference = (
+            REPO_ROOT / "codex/skills/minutes/references/quality-loop.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("finalize_docx.py prepare", skill)
+        self.assertIn("finalize_docx.py approve", skill)
+        self.assertIn("source-frozen", quality_reference)
+        self.assertIn("validated final Markdown", quality_reference)
+        self.assertIn("every latest page PNG at 100%", quality_reference)
+        self.assertIn("warnings alone", quality_reference)
+
+    def test_production_jobs_use_artifact_gates_not_repository_regression(self) -> None:
+        skill = self.primary_docs["codex/skills/minutes/SKILL.md"]
+
+        self.assertIn("Per-media production verification", skill)
+        self.assertIn("Repository change verification", skill)
+        self.assertIn("Do not run repository-wide", skill)
+        self.assertIn("unittest discover", skill)
+        self.assertIn("Do not inspect validator implementations or tests", skill)
+        self.assertIn("worker_runtime_summary.json", skill)
+        self.assertIn("reasoning effort `high`", skill)
+        self.assertIn("context_efficiency", skill)
+
+    def test_community1_is_governance_gated_and_offline_only(self) -> None:
+        security = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+
+        self.assertIn("Community-1 gated 모델 거버넌스", security)
+        self.assertIn("scripts.community1_governance", security)
+        self.assertIn("HF_HUB_OFFLINE=1", security)
+        self.assertIn("HUGGING_FACE_HUB_TOKEN", security)
+        self.assertIn("자동 다운로드하지 않는다", security)
 
 
 if __name__ == "__main__":

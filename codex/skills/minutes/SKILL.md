@@ -1,6 +1,6 @@
 ---
 name: minutes
-description: "Use when processing a local video or audio file with the minutes repo: local ffmpeg and MLX Whisper STT, optional video OCR and selected snapshots, evidence-only speaker identification without local audio diarization, content-driven Codex document generation, archival, and artifact verification."
+description: "Use when processing local video or audio with the minutes repo: ffmpeg and MLX Whisper STT, video OCR and selected snapshots, evidence-only speaker identification, source-language content freeze, optional one-pass translation, Word delivery, archival, and artifact verification."
 ---
 
 # minutes
@@ -13,12 +13,15 @@ repository. Do not assume the input is a meeting.
 - Default input is `~/remind`; default work/output root is `~/minutes`.
 - Supported extensions are `.mp4`, `.mkv`, `.mov`, `.m4a`, `.mp3`, `.wav`, `.aac`,
   `.flac`, and `.ogg`.
-- Preserve the detected source language in STT and OCR. `OUTPUT_LANGUAGE=auto` preserves
-  it, `ko` requests direct Korean synthesis, and `en` requests direct English synthesis.
-  Never translate a completed intermediate document and summarize it again.
+- Preserve the detected source language in STT and OCR. `OUTPUT_LANGUAGE=auto` keeps the final
+  document in that language. When an explicit `ko` or `en` target differs from the detected
+  language, author and freeze `minutes.md` in the source language, then translate that completed
+  Markdown exactly once in an isolated low-reasoning turn. Translation must not reread evidence,
+  summarize, reanalyze, fact-check, restructure, or trigger another model review.
 - Derive the title, document type, and sections from the actual content. Do not hardcode
-  `회의록`, `Meeting Minutes`, `영상 요약`, or meeting-only sections. Do not impose a hard
-  word, token, page, bullet, or section-count limit.
+  `회의록`, `Meeting Minutes`, `영상 요약`, or meeting-only sections. Do not impose fixed
+  word, token, page, or bullet targets. Use the quality-loop blueprint gate to reject avoidable
+  top-level fragmentation while preserving content-driven H3 depth.
 - Use `SPEAKER_ATTRIBUTION_MODE=evidence` and
   `SPEAKER_ATTRIBUTION_REQUIRED=false`. `audio` and `hybrid` are forbidden in the automatic
   workflow.
@@ -39,12 +42,21 @@ repository. Do not assume the input is a meeting.
 - Verify `speaker_attribution_report.json` records
   `local_audio_diarization=disabled_by_policy`, and verify `process_metrics.json` contains
   `validate_speech_activity` but no `diarize` or `attribute_speakers` stage.
-- Final output goes under `~/minutes/output/<recording-date>/<content-title>/`. Prefer a
-  valid date in the original filename; otherwise use media mtime.
+- Final output goes under `~/minutes/output/<recording-date>_<content-title>/`, so every
+  folder is content-identifiable at the output root. Prefer a valid date in the original
+  filename; otherwise use media mtime.
 - Keep only the renamed media, final `.md`, final `.docx`, and meaningful `snapshots/` in
-  the final folder. Keep transcript, OCR, speaker evidence report, audit artifacts, status,
-  and diagnostics in `~/minutes/jobs/<job_id>/` for `COMPLETED_JOB_RETENTION_HOURS`
-  (default 24), then purge only a completed job whose final artifacts verify.
+  the final folder. Keep `docx_qa.json`, transcript, OCR, speaker evidence report, audit
+  artifacts, status, and diagnostics in `~/minutes/jobs/<job_id>/` only through parent-side
+  performance/quality evaluation. `COMPLETED_JOB_RETENTION_HOURS=0` is the default; the next
+  cleanup purges a completed job only after final-artifact verification. Set a positive retention
+  value only when an intentional rework window is required.
+- Before final-folder verification, derive the end of substantive content from the cumulative
+  evidence. Remove only unreferenced archived Snapshots after that boundary when they show a
+  lock screen, unrelated application/browser activity, or a private desktop. Preserve every
+  reader-referenced Snapshot and every image needed to support substantive content, then verify
+  that all final Markdown Snapshot references resolve. Snapshot count is not the coverage gate;
+  the complete timestamped STT/OCR ledger and selected-image hashes are.
 - For a direct child of `~/remind`, move the source through the job into final output after
   successful local analysis; leave no duplicate in the inbox. Preserve external originals
   and move only their job copy.
@@ -52,27 +64,62 @@ repository. Do not assume the input is a meeting.
   provider configured by the user. Official-source web searches may contain only minimal
   public product/version/policy queries, never raw evidence, participant/customer names,
   internal identifiers, or secrets.
-- Remove reproducible `audio.wav` immediately after STT when cleanup is enabled. Remove raw
-  OCR frames after successful OCR, but retain selected Snapshots through document review.
+- Remove reproducible `audio.wav` immediately after STT when cleanup is enabled. Retain raw
+  OCR frames, their SHA-256 manifest, and selected Snapshots through content audit, DOCX render
+  review, archive verification, and the completed-job retention window; only the verified
+  completed-job purge removes them.
 - Use `OCR_WORKERS` for bounded frame-level parallelism and keep
   `OCR_TESSERACT_THREAD_LIMIT=1`. Apply parallel results in timestamp order so visual/text
   dedupe and Snapshot numbering remain deterministic. Respect the configured worker value;
   do not derive or change it from a machine-specific CPU benchmark.
+- For video, read the bounded `evidence_coverage_summary.json` before inventory authoring. Do not
+  open or print the full `evidence_coverage.json`; deterministic validators read that raw ledger
+  internally. Require complete raw-frame accounting, valid raw/Snapshot hashes, and a maximum selected-Snapshot gap no greater than
+  `OCR_MAX_SNAPSHOT_GAP_SECONDS` (default 120). Review `visual_only`, `speaker_ui_change`, and
+  `forced_coverage` frames when material. Use resolvable refs in the exact forms
+  `STT:HH:MM:SS-HH:MM:SS`, `OCR:HH:MM:SS`, and
+  `Snapshot:snapshot-NNNN@HH:MM:SS`. A required item supported only by visual evidence must
+  include a Snapshot ref.
 - With `CONTENT_AUDIT_MODE=strict`, create `content_inventory.json` before drafting and
   `content_audit.json` after drafting. Preserve dates, versions, quantities, ranges, units,
   conditions, exceptions, negation, limitations, Q&A, and source conflicts. Do not archive
   until the audit passes.
+- For every fresh-context strict job, read `references/quality-loop.md` and apply its
+  Ultra-derived evidence-ledger, reader-facing blueprint, and adversarial revision workflow.
+  Create hash-bound `evidence_ledger.json`, `document_blueprint.json`, and
+  `content_quality_review.json`; the strict archive gate rejects a missing chunk, an unmapped
+  required inventory item, an over-fragmented or citation-noisy reader document, a failed final
+  check, or stale hashes.
 - If evidence exceeds one context, read it sequentially by timestamp into one cumulative
   inventory. Do not create lossy section summaries and summarize them again.
 - Keep the preprocessing conversation out of document synthesis. Outside a fresh worker,
   run local preprocessing only, do not open the full transcript, OCR, or Snapshots, and hand
-  the prepared job to `./scripts/run_fresh_codex_job.py`. The launcher starts a new
-  `codex exec --ephemeral` session with only job paths, prepared policy values, and short
-  per-job overrides; it never embeds raw evidence in the handoff prompt.
-- A fresh worker, identified by its prompt and `MINUTES_FRESH_CONTEXT=1`, must not launch
-  another worker. It reads the complete `codex_minutes_input.md` directly from disk and
-  completes inventory, drafting, audit, archive, and verification. Do not silently fall back
-  to the long parent conversation if isolated execution fails.
+  the prepared job to `./scripts/run_fresh_codex_job.py`. The launcher starts an isolated
+  `codex exec --ephemeral` content phase and an isolated delivery phase. It inserts one isolated translation-only phase between
+  them only when an explicit target language differs from the detected source. Content and delivery
+  default to reasoning effort `high`; translation defaults to `low`. Raw evidence is available only
+  to the content worker and is never embedded in a handoff prompt. Use an explicit CLI override only
+  for a controlled comparison.
+- A fresh content worker, identified by its prompt and `MINUTES_FRESH_CONTEXT=1`, must not launch
+  another worker. It reads every byte-bounded, non-overlapping part in `evidence_chunks.json`
+  exactly once in manifest order, then completes inventory, drafting, audit, compact quality
+  review, and `content_freeze.json` in the source language when translation is required. It must
+  not create a DOCX or archive. The optional translation turn receives only frozen `minutes.md`,
+  writes `minutes.translated.md` as its final response without tools, and is accepted only after
+  `translation_manifest.json` binds the source freeze and target hash while verifying Markdown
+  structure and protected literals. The delivery worker must not read STT, OCR, evidence chunks,
+  ledger, inventory, or audit prose; it verifies the freeze and optional translation manifest,
+  performs DOCX-only finalization, archives, and verifies. Valid content and translation artifacts
+  are reused after delivery failure so evidence and translation are not repeated.
+- Treat a fresh worker as a production media job, not repository development. Read this skill
+  and each required reference once, and do not reread them. Do not inspect validator
+  implementations or tests unless a validator fails with an error that the skill cannot resolve.
+  Do not run repository-wide compilation, test, lint, or git-review commands during a media job;
+  deterministic artifact gates and launcher post-verification are the acceptance path.
+- Read `worker_runtime_summary.json` for preprocessing, resource, speaker-policy, and speech-
+  validation facts. Do not print the full `status.json`, `process_metrics.json`,
+  `speaker_attribution_report.json`, or `speech_activity.json`; deterministic validators may read
+  those raw files without returning their large arrays to the model.
 - The recording remains the source of truth for what was said. With
   `OFFICIAL_SOURCE_VERIFICATION=auto`, inspect local audio context, timestamped STT, OCR,
   and relevant Snapshots first. Use current official documents only to clarify remaining
@@ -109,21 +156,64 @@ If the user supplied a short instruction that is not already represented by
   --request "Report total wall time and validation results"
 ```
 
-Inside the fresh worker, read the generated
-`~/minutes/jobs/<job_id>/codex_minutes_input.md` completely and only the selected Snapshots
-necessary for evidence resolution. In strict mode, write `content_inventory.json`,
-`official_sources.json`, `minutes.md`, and `content_audit.json` in that order, then archive:
+Inside the content worker, read `evidence_coverage_summary.json`, then every byte-bounded path in
+`~/minutes/jobs/<job_id>/evidence_chunks.json` exactly once in order, one file per tool call, and only the selected
+Snapshots necessary for evidence resolution. In strict mode, write `content_inventory.json`,
+`evidence_ledger.json`, `document_blueprint.json`, `official_sources.json`, `minutes.md`,
+`content_audit.json`, and `content_quality_review.json` in the quality-loop order. The blueprint
+must make the cover document type, evidence metadata, functional H2 roles, primary inventory
+placement, form factors, operational utility, and reader-facing evidence placement explicit.
+Write only the eight model-judged schema-v3 checks, then run:
 
 ```bash
+python scripts/content_freeze.py "<job-directory>"
+```
+
+The command fills hashes, reviewed chunk indexes, and document signals deterministically and
+reruns the complete content gate. When translation is required, the launcher then starts one
+low-reasoning, tool-free translation turn from frozen `minutes.md` and validates it with:
+
+```bash
+python scripts/translation.py "<job-directory>" --verify
+```
+
+This produces `minutes.translated.md` plus hash-bound `translation_manifest.json`. It performs no
+second content review and never reads STT, OCR, inventory, audit, ledger, or Snapshots. If source
+and target languages already match, this phase is skipped. The launcher then starts delivery.
+
+For `DOCX_ENABLED=true`, the delivery worker invokes the bundled `documents` skill and uses the
+`standard_business_brief` preset with its render-and-inspect contract. Generate a deterministic
+job-local draft, render into a clean directory, and run structural QA with one command:
+
+```bash
+python scripts/finalize_docx.py prepare "<job-directory>"
+```
+
+Inspect every latest page PNG at 100%. The source-frozen Markdown and validated final Markdown must
+not change for pagination. Revise
+only blocking layout defects and rerender once with `prepare --reuse-final`; warnings alone do not
+authorize another render. A third render requires an explicit supported `--blocking-defect-code`.
+After all pages pass, write compact `visual_review.json` and bind it deterministically:
+
+```bash
+python scripts/finalize_docx.py approve "<job-directory>"
 python scripts/archive_job.py "<job-directory>"
 ```
 
+The structural gate rejects unsupported Markdown leakage, internal Codex citation tokens, body
+fake lists, preset drift, broken TOC bookmarks, and inconsistent table DXA geometry. Numbered stage
+labels inside table cells are not body-list failures. The archive step copies
+`minutes.final.docx`; it must not regenerate or overwrite it.
+
 The H1 becomes the display title, output directory, and renamed media stem.
 
-`fresh_codex_handoff.json` records the full evidence file sizes and SHA-256 hashes, Snapshot
-count, the small prompt hash, `parent_conversation_inherited=false`, and
-`raw_evidence_embedded_in_handoff=false`. These are integrity and boundary checks; they do
-not replace the strict content inventory and post-draft audit.
+`fresh_codex_handoff.json` records individual core evidence file hashes plus bounded aggregate
+counts, byte totals, and combined manifest hashes for Snapshot/raw-frame directories. It also
+records separate content/translation/delivery prompt hashes, phase elapsed time, tokens, tool calls,
+`parent_conversation_inherited=false`, and `raw_evidence_embedded_in_handoff=false`.
+`context_efficiency` records aggregate uncached input, cache ratio, input/output ratio, and bounded
+command-output pressure. Compare phase records on the next run; they do not replace strict content
+inventory and post-draft audit.
 
 When the parent itself is running inside the macOS Codex seatbelt, launch
 `./scripts/run_fresh_codex_job.py` with initial `sandbox_permissions=require_escalated`.
@@ -134,19 +224,20 @@ is a direct child of configured `~/minutes/jobs`, then starts the worker with it
 ## Expected Output Layout
 
 ```text
-~/minutes/output/YYYY-MM-DD/
-  내용-기반-제목/
-    YYYY-MM-DD_내용-기반-제목.mov 또는 YYYY-MM-DD_내용-기반-제목.m4a
-    YYYY-MM-DD_내용-기반-제목.md
-    YYYY-MM-DD_내용-기반-제목.docx
-    snapshots/
-      snapshot_0001_00-00-00.jpg
+~/minutes/output/YYYY-MM-DD_내용-기반-제목/
+  YYYY-MM-DD_내용-기반-제목.mov 또는 YYYY-MM-DD_내용-기반-제목.m4a
+  YYYY-MM-DD_내용-기반-제목.md
+  YYYY-MM-DD_내용-기반-제목.docx
+  snapshots/
+    snapshot_0001_00-00-00.jpg
 ```
 
 ## DOCX Requirements
 
-Generate DOCX when `DOCX_ENABLED=true` with `scripts/docx_report.py`. Also use the bundled
-`documents` skill and follow its render-and-inspect contract.
+Generate the job-local DOCX through `scripts/finalize_docx.py` when `DOCX_ENABLED=true`, then use
+the bundled `documents` skill as the visual shipping gate. A Codex or strict job without a valid
+content freeze, hash-matching `minutes.final.docx`, latest rendered pages, complete
+`visual_review.json`, and passed `docx_qa.json` must not archive.
 
 On macOS Codex, never probe LibreOffice from `CODEX_SANDBOX=seatbelt`; it can abort and
 leave repeated crash dialogs. Run the project guard with initial escalation:
@@ -160,26 +251,40 @@ python scripts/render_docx_checked.py \
 
 The DOCX needs a content-derived cover, static linked TOC with matching bookmarks,
 language-appropriate styling, explicit table geometry, repeating table headers, practical
-row non-splitting, and footer page numbers.
+row non-splitting, and footer page numbers. When H2/H3 navigation is dense, keep every body
+heading but collapse the visible TOC to top-level content headings so it does not create a mostly
+blank spill page. Render Markdown task items as `☐`/`☑`, never literal `[ ]`/`[x]` text.
 
 ## Verification
 
-Before completion:
+### Per-media production verification
+
+For a normal fresh-context media job, run only the configured content audit, content-quality
+review, DOCX render/QA, archive gate, and final-folder checks described above. Do not run
+repository-wide `py_compile`, `unittest discover`, `pytest`, lint, static analysis, or git review.
+Do not inspect validator implementations or tests unless a validator actually fails and its
+bounded error cannot be resolved from this skill. Keep full command output in job-local logs when
+available and return only exit status, hashes, counts, and bounded failure details to the model.
+
+Render every DOCX page and inspect the cover, TOC, tables, and final page. Verify TOC links,
+bookmarks, table geometry, final-folder contents, source move semantics, strict audit coverage,
+`content_freeze.json`, an optional `translation_manifest.json`, `docx_qa.json` hashes/status, and
+retained job evidence. Specifically verify
+`speech_activity.json` is validation-only, `local_audio_diarization=disabled_by_policy`, and no
+diarization stage appears in metrics. For Codex mode, verify `fresh_codex_handoff.json` reports
+isolated content and delivery phases, plus translation only when required; no parent conversation
+inheritance; no raw evidence outside content; matching input/Snapshot/final-Markdown hashes; and
+`state=completed`. A zero Codex exit code without completed
+`status.json` and real archived artifacts is a failure.
+
+### Repository change verification
+
+Only after modifying the repository code, this skill, or tests, run the full regression checks:
 
 ```bash
 python -m py_compile scripts/*.py
 python -m unittest discover -s tests -v
 ```
-
-Render every DOCX page and inspect the cover, TOC, tables, and final page. Verify TOC links,
-bookmarks, and table geometry. Verify final-folder contents, source move semantics, strict
-audit coverage, and retained job evidence. Specifically verify `speech_activity.json` is
-validation-only, `local_audio_diarization=disabled_by_policy`, and no diarization stage appears in
-metrics for either English or Korean input and whether or not screen evidence exists.
-For Codex mode, also verify `fresh_codex_handoff.json` reports an ephemeral session, no parent
-conversation inheritance, no raw evidence embedded in the handoff, matching input/Snapshot
-hashes, and `state=completed`. A zero Codex exit code without completed `status.json` and real
-archived source/Markdown files is a failure.
 
 When comparing a reprocessed document with an earlier result, assess speaker-name evidence,
 unsupported attribution, retained factual content, omissions, section structure, wall time,
@@ -203,3 +308,4 @@ name, but unresolved identity must never cause content loss.
 ## References
 
 Read `references/docx-validation.md` when changing DOCX generation or testing DOCX output.
+Read `references/quality-loop.md` for every fresh-context strict Codex job.
