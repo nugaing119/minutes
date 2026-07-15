@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -95,6 +96,34 @@ class CleanupCompletedJobsTests(unittest.TestCase):
             self.assertFalse(result["eligible"])
             self.assertEqual(result["reason"], "retention period is still active")
             self.assertTrue(job_dir.exists())
+
+    def test_job_local_docx_qa_is_verified_without_shipping_it_to_output(self) -> None:
+        now = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            job_dir, output_dir = self._completed_job(
+                root,
+                "docx-job",
+                completed_at=now - timedelta(hours=25),
+            )
+            docx = output_dir / "minutes.docx"
+            docx.write_bytes(b"docx")
+            qa = job_dir / "docx_qa.json"
+            qa.write_text("{}", encoding="utf-8")
+            status_path = job_dir / "status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["files"].update({"docx": str(docx), "docx_qa": str(qa)})
+            write_json(status_path, status)
+
+            result = cleanup_completed_job(
+                job_dir,
+                apply=False,
+                retention_hours=24,
+                now=now,
+            )
+
+            self.assertTrue(result["eligible"])
+            self.assertFalse((output_dir / "docx_qa.json").exists())
 
     def test_failed_job_and_completed_job_with_missing_output_are_kept(self) -> None:
         now = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)

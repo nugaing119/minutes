@@ -9,10 +9,157 @@ from zipfile import ZipFile
 from docx import Document
 from docx.oxml.ns import qn
 
-from scripts.docx_report import generate_docx_report, wrap_cover_title
+from scripts.docx_report import (
+    DOCUMENTS_PRESET,
+    column_widths,
+    generate_docx_report,
+    wrap_cover_title,
+)
 
 
 class DocxReportTests(unittest.TestCase):
+    def test_five_column_table_reserves_readable_first_column(self) -> None:
+        widths = column_widths(5)
+
+        self.assertEqual(sum(widths), 9360)
+        self.assertGreaterEqual(widths[0], 900)
+
+    def test_cover_and_contents_labels_follow_document_language(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            english_markdown = root / "english.md"
+            english_output = root / "english.docx"
+            english_markdown.write_text(
+                "# Product briefing\n\n"
+                "Document type: Internal briefing\n\n"
+                "## Direction\n\n"
+                "Body\n",
+                encoding="utf-8",
+            )
+            generate_docx_report(
+                english_markdown,
+                english_output,
+                saved_date="2026-04-13",
+            )
+
+            korean_markdown = root / "korean.md"
+            korean_output = root / "korean.docx"
+            korean_markdown.write_text(
+                "# 제품 브리핑\n\n"
+                "문서 유형: 내부 브리핑\n\n"
+                "## 방향\n\n"
+                "본문\n",
+                encoding="utf-8",
+            )
+            generate_docx_report(
+                korean_markdown,
+                korean_output,
+                saved_date="2026-04-13",
+            )
+
+            english_text = [
+                paragraph.text for paragraph in Document(english_output).paragraphs
+            ]
+            korean_text = [
+                paragraph.text for paragraph in Document(korean_output).paragraphs
+            ]
+
+        self.assertIn("Contents", english_text)
+        self.assertIn("Recorded: 2026-04-13", english_text)
+        self.assertNotIn("목차", english_text)
+        self.assertFalse(any("작성일" in text for text in english_text))
+        self.assertIn("목차", korean_text)
+        self.assertIn("기록일: 2026-04-13", korean_text)
+        self.assertFalse(any("작성일" in text for text in korean_text))
+
+    def test_standard_business_brief_preset_is_encoded_in_styles_and_page(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            markdown = root / "analysis.md"
+            output = root / "analysis.docx"
+            markdown.write_text(
+                "# 기술 검토\n\n문서 유형: 기술 브리프\n\n## 결론\n\n본문\n",
+                encoding="utf-8",
+            )
+
+            generate_docx_report(markdown, output, saved_date="2026-07-15")
+            document = Document(output)
+
+        self.assertEqual(DOCUMENTS_PRESET, "standard_business_brief")
+        section = document.sections[0]
+        self.assertAlmostEqual(section.top_margin.inches, 1.0, places=3)
+        self.assertAlmostEqual(section.right_margin.inches, 1.0, places=3)
+        normal = document.styles["Normal"]
+        self.assertEqual(normal.font.name, "Calibri")
+        self.assertEqual(normal.font.size.pt, 11.0)
+        self.assertEqual(normal.paragraph_format.space_after.pt, 6.0)
+        self.assertEqual(document.styles["Heading 1"].font.size.pt, 16.0)
+        self.assertEqual(document.styles["Heading 2"].font.size.pt, 13.0)
+        self.assertEqual(document.styles["Heading 3"].font.size.pt, 12.0)
+
+    def test_bold_blockquote_and_ordered_list_do_not_leak_markdown_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            markdown = root / "analysis.md"
+            output = root / "analysis.docx"
+            markdown.write_text(
+                "# 기술 검토\n\n"
+                "문서 유형: 기술 브리프\n\n"
+                "## 조치\n\n"
+                "**중요:** 순서대로 수행한다.\n\n"
+                "> 운영 중에는 기존 근거를 보존한다.\n\n"
+                "1. 먼저 검증한다.\n"
+                "2. 이후 배포한다.\n",
+                encoding="utf-8",
+            )
+
+            generate_docx_report(markdown, output, saved_date="2026-07-15")
+            document = Document(output)
+
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        self.assertNotIn("**", text)
+        self.assertNotIn("> 운영", text)
+        self.assertFalse(
+            any(
+                paragraph.text.startswith(("1. ", "2. "))
+                for paragraph in document.paragraphs
+                if paragraph.style.name == "List Number"
+            )
+        )
+        bold_runs = [
+            run
+            for paragraph in document.paragraphs
+            for run in paragraph.runs
+            if run.text == "중요:"
+        ]
+        self.assertEqual(len(bold_runs), 1)
+        self.assertTrue(bold_runs[0].bold)
+        self.assertTrue(
+            any(paragraph.style.name == "Quote" for paragraph in document.paragraphs)
+        )
+        self.assertEqual(
+            sum(
+                paragraph.style.name == "List Number"
+                for paragraph in document.paragraphs
+            ),
+            2,
+        )
+
+    def test_internal_codex_citation_token_is_rejected_before_docx_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            markdown = root / "analysis.md"
+            output = root / "analysis.docx"
+            markdown.write_text(
+                "# 제목\n\n본문 citeturn1search0\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "internal Codex citation"):
+                generate_docx_report(markdown, output)
+
+        self.assertFalse(output.exists())
+
     def test_long_cover_title_wraps_at_a_semantic_word_boundary(self) -> None:
         title = "OCI Console AI와 MCP 기반 클라우드 운영 자동화 검토"
 
@@ -142,6 +289,62 @@ class DocxReportTests(unittest.TestCase):
                 ],
                 [0, 1, 0, 1],
             )
+
+    def test_dense_toc_collapses_to_top_level_headings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            markdown = root / "analysis.md"
+            output = root / "analysis.docx"
+            sections = "\n\n".join(
+                f"## Topic {index}\n\n### Detail {index}\n\nBody {index}."
+                for index in range(1, 14)
+            )
+            markdown.write_text(
+                "# Dynamic analysis\n\n"
+                "Document type: Technical analysis\n\n"
+                f"{sections}\n",
+                encoding="utf-8",
+            )
+
+            generate_docx_report(markdown, output, saved_date="2026-07-15")
+
+            namespace = {
+                "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            }
+            with ZipFile(output) as archive:
+                root_xml = ET.fromstring(archive.read("word/document.xml"))
+            toc_texts = [
+                "".join(link.itertext())
+                for link in root_xml.findall(".//w:hyperlink", namespace)
+            ]
+
+        self.assertEqual(len(toc_texts), 13)
+        self.assertTrue(all("Detail" not in text for text in toc_texts))
+        self.assertEqual(toc_texts[0], "1. Topic 1")
+        self.assertEqual(toc_texts[-1], "13. Topic 13")
+
+    def test_markdown_checklists_render_as_real_checkbox_glyphs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            markdown = root / "analysis.md"
+            output = root / "analysis.docx"
+            markdown.write_text(
+                "# Technical analysis\n\n"
+                "Document type: Operational brief\n\n"
+                "## Actions\n\n"
+                "- [ ] Validate the rollout.\n"
+                "- [x] Preserve the evidence.\n",
+                encoding="utf-8",
+            )
+
+            generate_docx_report(markdown, output, saved_date="2026-07-15")
+            paragraph_text = [
+                paragraph.text for paragraph in Document(output).paragraphs
+            ]
+
+        self.assertIn("☐ Validate the rollout.", paragraph_text)
+        self.assertIn("☑ Preserve the evidence.", paragraph_text)
+        self.assertFalse(any("[ ]" in text or "[x]" in text for text in paragraph_text))
 
     def test_inline_code_and_official_links_render_without_markdown_syntax(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

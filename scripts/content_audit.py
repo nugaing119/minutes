@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+from scripts.media_types import is_video_extension
+from scripts.content_quality import validate_content_quality_artifacts
 
 
 AUDIT_MODES = {"off", "warn", "strict"}
@@ -78,6 +82,12 @@ def content_fidelity_instruction(
             "intentional omission으로 처리할 수 없습니다. qualifier_changes, "
             "silent_conflicts, missing_item_ids, rewritten_by_external_source_item_ids는 "
             "비어 있어야 status=passed입니다.",
+            "영상 job에서는 bounded evidence_coverage_summary.json을 먼저 확인하고 "
+            "원시 evidence_coverage.json을 직접 출력하지 마세요. coverage_passed=true, "
+            "accounting_complete=true, 최대 Snapshot 간격 정책 통과 여부를 검증하세요. "
+            "source_refs의 로컬 근거는 `STT:HH:MM:SS-HH:MM:SS`, "
+            "`OCR:HH:MM:SS`, `Snapshot:snapshot-NNNN@HH:MM:SS` 형식으로 기록하세요. "
+            "STT 없이 시각 자료만으로 뒷받침되는 항목은 반드시 Snapshot ref를 포함하세요.",
         ]
     )
 
@@ -138,8 +148,13 @@ def content_fidelity_instruction(
     parts.extend(
         [
             "",
-            "작성 순서: content_inventory.json → 필요한 공식 문서 조사 및 "
-            "official_sources.json → minutes.md → content_audit.json → archive_job.py.",
+            "작성 순서: evidence_ledger.json → content_inventory.json → "
+            "document_blueprint.json → 필요한 공식 문서 조사 및 official_sources.json → "
+            "minutes.md → content_audit.json → content_quality_review.json → "
+            "content_freeze.py. fresh-context strict job에서는 minutes 스킬의 "
+            "references/quality-loop.md에 따라 reader-facing blueprint와 adversarial "
+            "review를 모두 통과하고 본문을 동결하세요. 별도 delivery worker만 DOCX와 "
+            "archive_job.py를 실행합니다.",
             "감사가 통과하지 않으면 문서를 보완한 뒤 다시 감사하고, 통과 전에는 "
             "archive_job.py를 실행하지 마세요.",
         ]
@@ -173,15 +188,53 @@ def validate_content_artifacts(
     inventory = _read_object(job_dir / "content_inventory.json", issues)
     audit = _read_object(job_dir / "content_audit.json", issues)
     minutes_text = _read_text(job_dir / "minutes.md", issues)
-    inventory_ids, required_ids, conflict_ids, official_ids = _validate_inventory(
+    (
+        inventory_ids,
+        required_ids,
+        conflict_ids,
+        official_ids,
+        inventory_source_refs,
+    ) = _validate_inventory(
         inventory,
         issues,
     )
+    video_sources = [
+        path for path in job_dir.glob("source.*") if is_video_extension(path.suffix)
+    ]
+    coverage_required = bool(video_sources) or (job_dir / "evidence_coverage.json").exists()
+    coverage_summary: dict[str, Any] = {
+        "required": coverage_required,
+        "status": "not_required",
+        "resolved_inventory_refs": 0,
+    }
+    if coverage_required:
+        evidence_coverage = _read_object(job_dir / "evidence_coverage.json", issues)
+        coverage_summary = _validate_evidence_coverage(
+            job_dir,
+            evidence_coverage,
+            issues,
+        )
+        reference_summary = _validate_inventory_evidence_refs(
+            job_dir,
+            inventory_source_refs,
+            required_ids=required_ids,
+            evidence_coverage=evidence_coverage,
+            issues=issues,
+        )
+        coverage_summary.update(reference_summary)
     _validate_audit(
         audit,
         inventory_ids=inventory_ids,
         required_ids=required_ids,
         conflict_ids=conflict_ids,
+        minutes_text=minutes_text,
+        issues=issues,
+    )
+
+    quality_summary = validate_content_quality_artifacts(
+        job_dir,
+        inventory_ids=inventory_ids,
+        required_ids=required_ids,
         minutes_text=minutes_text,
         issues=issues,
     )
@@ -206,6 +259,8 @@ def validate_content_artifacts(
         "inventory_items": len(inventory_ids),
         "required_items": len(required_ids),
         "conflicts": len(conflict_ids),
+        "captured_evidence_coverage": coverage_summary,
+        "content_quality_review": quality_summary,
         "issues": issues,
     }
     if issues and audit_mode == "strict":
@@ -242,20 +297,27 @@ def _read_text(path: Path, issues: list[str]) -> str:
 def _validate_inventory(
     inventory: dict[str, Any],
     issues: list[str],
-) -> tuple[set[str], set[str], set[str], set[str]]:
+) -> tuple[
+    set[str],
+    set[str],
+    set[str],
+    set[str],
+    dict[str, list[str]],
+]:
     if not inventory:
-        return set(), set(), set(), set()
+        return set(), set(), set(), set(), {}
     if inventory.get("schema_version") != 1:
         issues.append("content_inventory.json schema_version must be 1")
 
     items = inventory.get("items")
     if not isinstance(items, list) or not items:
         issues.append("content_inventory.json items must be a non-empty list")
-        return set(), set(), set(), set()
+        return set(), set(), set(), set(), {}
 
     item_ids: set[str] = set()
     required_ids: set[str] = set()
     official_ids: set[str] = set()
+    item_source_refs: dict[str, list[str]] = {}
     for index, item in enumerate(items):
         label = f"content_inventory.json items[{index}]"
         if not isinstance(item, dict):
@@ -282,6 +344,12 @@ def _validate_inventory(
             _nonempty_string(ref) for ref in source_refs
         ):
             issues.append(f"{label}.source_refs must contain evidence references")
+        else:
+            item_source_refs[item_id] = [
+                clean
+                for ref in source_refs
+                if (clean := _nonempty_string(ref))
+            ]
         importance = item.get("importance")
         if importance not in {"required", "optional"}:
             issues.append(f"{label}.importance must be required or optional")
@@ -320,7 +388,303 @@ def _validate_inventory(
                 [ref for ref in refs if _nonempty_string(ref)]
             ) < 2:
                 issues.append(f"{label}.source_refs must contain both sides")
-    return item_ids, required_ids, conflict_ids, official_ids
+    return item_ids, required_ids, conflict_ids, official_ids, item_source_refs
+
+
+def _validate_evidence_coverage(
+    job_dir: Path,
+    coverage: dict[str, Any],
+    issues: list[str],
+) -> dict[str, Any]:
+    if not coverage:
+        return {
+            "required": True,
+            "status": "failed",
+            "resolved_inventory_refs": 0,
+        }
+    if coverage.get("schema_version") != 1:
+        issues.append("evidence_coverage.json schema_version must be 1")
+    if coverage.get("coverage_passed") is not True:
+        issues.append("evidence_coverage.json coverage_passed must be true")
+    if coverage.get("accounting_complete") is not True:
+        issues.append("evidence_coverage.json accounting_complete must be true")
+
+    frames = coverage.get("frames")
+    if not isinstance(frames, list) or not frames:
+        issues.append("evidence_coverage.json frames must be a non-empty list")
+        frames = []
+    raw_frame_count = _nonnegative_int(coverage.get("raw_frame_count"))
+    selected_snapshot_count = _nonnegative_int(
+        coverage.get("selected_snapshot_count")
+    )
+    accounted_frame_count = _nonnegative_int(
+        coverage.get("accounted_frame_count")
+    )
+    if raw_frame_count is None or raw_frame_count != len(frames):
+        issues.append("evidence coverage raw_frame_count does not match frame records")
+    if accounted_frame_count is None or accounted_frame_count != len(frames):
+        issues.append("evidence coverage accounted_frame_count does not match frame records")
+
+    reason_counts = coverage.get("reason_counts")
+    if not isinstance(reason_counts, dict) or any(
+        not isinstance(value, int) or value < 0 for value in reason_counts.values()
+    ):
+        issues.append("evidence_coverage.json reason_counts must contain nonnegative integers")
+        reason_counts = {}
+    if sum(reason_counts.values()) != len(frames):
+        issues.append("evidence coverage reason counts do not account for every raw frame")
+
+    selected_records = 0
+    seen_ids: set[str] = set()
+    for index, frame in enumerate(frames):
+        label = f"evidence_coverage.json frames[{index}]"
+        if not isinstance(frame, dict):
+            issues.append(f"{label} must be an object")
+            continue
+        evidence_id = _nonempty_string(frame.get("evidence_id"))
+        if not evidence_id or evidence_id in seen_ids:
+            issues.append(f"{label}.evidence_id must be unique and non-empty")
+        else:
+            seen_ids.add(evidence_id)
+        raw_path = _safe_job_evidence_path(job_dir, frame.get("raw_frame"))
+        if raw_path is None or not raw_path.is_file():
+            issues.append(f"{label} raw frame is missing or outside the job")
+        else:
+            expected_hash = _nonempty_string(frame.get("raw_frame_sha256"))
+            if not expected_hash or _sha256_file(raw_path) != expected_hash:
+                issues.append(f"{label} raw frame hash does not match")
+        if frame.get("selected") is True:
+            selected_records += 1
+            snapshot_path = _safe_job_evidence_path(job_dir, frame.get("snapshot"))
+            if snapshot_path is None or not snapshot_path.is_file():
+                issues.append(f"{label} selected snapshot is missing or outside the job")
+            else:
+                expected_snapshot_hash = _nonempty_string(
+                    frame.get("snapshot_sha256")
+                )
+                if (
+                    not expected_snapshot_hash
+                    or _sha256_file(snapshot_path) != expected_snapshot_hash
+                ):
+                    issues.append(f"{label} selected snapshot hash does not match")
+    if selected_snapshot_count is None or selected_snapshot_count != selected_records:
+        issues.append("evidence coverage selected_snapshot_count does not match records")
+
+    max_gap = _nonnegative_number(
+        coverage.get("max_selected_snapshot_gap_seconds")
+    )
+    gap_limit = _nonnegative_number(
+        coverage.get("max_snapshot_gap_limit_seconds")
+    )
+    if max_gap is None or gap_limit is None or max_gap > gap_limit:
+        issues.append("evidence coverage maximum snapshot gap exceeds its policy limit")
+
+    return {
+        "required": True,
+        "status": "passed" if not any("evidence coverage" in issue or "evidence_coverage.json" in issue for issue in issues) else "failed",
+        "raw_frame_count": raw_frame_count or 0,
+        "selected_snapshot_count": selected_snapshot_count or 0,
+        "max_selected_snapshot_gap_seconds": max_gap,
+        "resolved_inventory_refs": 0,
+    }
+
+
+def _validate_inventory_evidence_refs(
+    job_dir: Path,
+    inventory_source_refs: dict[str, list[str]],
+    *,
+    required_ids: set[str],
+    evidence_coverage: dict[str, Any],
+    issues: list[str],
+) -> dict[str, int]:
+    transcript = _read_optional_object(job_dir / "transcript.json")
+    transcript_ranges: list[tuple[float, float]] = []
+    for segment in transcript.get("segments", []):
+        if not isinstance(segment, dict):
+            continue
+        start = _number(segment.get("start"))
+        end = _number(segment.get("end"))
+        if start is not None and end is not None and end >= start:
+            transcript_ranges.append((start, end))
+
+    screen_text = _read_optional_object(job_dir / "screen_text.json")
+    ocr_timestamps = {
+        int(value)
+        for frame in screen_text.get("frames", [])
+        if isinstance(frame, dict)
+        and (value := _number(frame.get("timestamp_seconds"))) is not None
+    }
+    snapshot_timestamps: set[int] = set()
+    snapshot_names: set[str] = set()
+    snapshot_ids: set[str] = set()
+    for frame in evidence_coverage.get("frames", []):
+        if not isinstance(frame, dict) or frame.get("selected") is not True:
+            continue
+        timestamp = _number(frame.get("timestamp_seconds"))
+        if timestamp is not None:
+            snapshot_timestamps.add(int(timestamp))
+        snapshot = _nonempty_string(frame.get("snapshot"))
+        if snapshot:
+            snapshot_names.add(Path(snapshot).name)
+        snapshot_id = _nonempty_string(frame.get("snapshot_evidence_id"))
+        if snapshot_id:
+            snapshot_ids.add(snapshot_id)
+
+    resolved_count = 0
+    checked_count = 0
+    visual_only_items = 0
+    for item_id, refs in inventory_source_refs.items():
+        recognized = 0
+        resolved = 0
+        has_stt = False
+        has_snapshot = False
+        has_visual = False
+        for ref in refs:
+            kind = _evidence_ref_kind(ref)
+            if kind is None:
+                continue
+            recognized += 1
+            checked_count += 1
+            timestamps = [_timestamp_seconds(value) for value in TIMESTAMP_RE.findall(ref)]
+            timestamps = [value for value in timestamps if value is not None]
+            valid = False
+            if kind == "stt":
+                has_stt = True
+                valid = _stt_ref_resolves(timestamps, transcript_ranges)
+            elif kind == "ocr":
+                has_visual = True
+                valid = _timestamp_ref_resolves(timestamps, ocr_timestamps)
+            else:
+                has_visual = True
+                valid = _snapshot_ref_resolves(
+                    ref,
+                    timestamps,
+                    snapshot_timestamps,
+                    snapshot_names,
+                    snapshot_ids,
+                )
+                has_snapshot = has_snapshot or valid
+            if valid:
+                resolved += 1
+                resolved_count += 1
+            else:
+                issues.append(
+                    f"inventory item {item_id} evidence ref does not resolve: {ref}"
+                )
+        if item_id in required_ids and (recognized == 0 or resolved == 0):
+            issues.append(
+                f"required inventory item {item_id} has no resolvable local evidence ref"
+            )
+        if item_id in required_ids and has_visual and not has_stt:
+            visual_only_items += 1
+            if not has_snapshot:
+                issues.append(
+                    f"visual-only inventory item {item_id} requires a Snapshot ref"
+                )
+    return {
+        "checked_inventory_refs": checked_count,
+        "resolved_inventory_refs": resolved_count,
+        "visual_only_inventory_items": visual_only_items,
+    }
+
+
+TIMESTAMP_RE = re.compile(r"(?<!\d)(\d{2}:\d{2}:\d{2})(?!\d)")
+
+
+def _evidence_ref_kind(ref: str) -> str | None:
+    lowered = ref.lower()
+    if "snapshot" in lowered or re.search(r"snapshot_\d+", lowered):
+        return "snapshot"
+    if re.search(r"(?:^|[^a-z])ocr(?:[^a-z]|$)", lowered):
+        return "ocr"
+    if re.search(r"(?:^|[^a-z])stt(?:[^a-z]|$)", lowered):
+        return "stt"
+    return None
+
+
+def _stt_ref_resolves(
+    timestamps: list[int],
+    transcript_ranges: list[tuple[float, float]],
+) -> bool:
+    if not timestamps or not transcript_ranges:
+        return False
+    start = float(timestamps[0])
+    end = float(timestamps[-1])
+    return any(segment_start <= end and segment_end >= start for segment_start, segment_end in transcript_ranges)
+
+
+def _timestamp_ref_resolves(timestamps: list[int], available: set[int]) -> bool:
+    return bool(timestamps) and all(timestamp in available for timestamp in timestamps)
+
+
+def _snapshot_ref_resolves(
+    ref: str,
+    timestamps: list[int],
+    available_timestamps: set[int],
+    available_names: set[str],
+    available_ids: set[str],
+) -> bool:
+    if any(name in ref for name in available_names):
+        return True
+    if any(evidence_id in ref for evidence_id in available_ids):
+        return True
+    return _timestamp_ref_resolves(timestamps, available_timestamps)
+
+
+def _timestamp_seconds(value: str) -> int | None:
+    try:
+        hours, minutes, seconds = (int(part) for part in value.split(":"))
+    except (TypeError, ValueError):
+        return None
+    if minutes >= 60 or seconds >= 60:
+        return None
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _safe_job_evidence_path(job_dir: Path, value: Any) -> Path | None:
+    raw = _nonempty_string(value)
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    resolved = (path if path.is_absolute() else job_dir / path).resolve()
+    try:
+        resolved.relative_to(job_dir.resolve())
+    except ValueError:
+        return None
+    return resolved
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_optional_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _nonnegative_number(value: Any) -> float | None:
+    number = _number(value)
+    return number if number is not None and number >= 0 else None
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 def _validate_audit(

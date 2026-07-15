@@ -47,7 +47,11 @@ def _job_size(job_dir: Path) -> int:
     return total
 
 
-def _verify_final_artifacts(status: dict[str, Any]) -> tuple[bool, str, list[str]]:
+def _verify_final_artifacts(
+    status: dict[str, Any],
+    *,
+    job_dir: Path,
+) -> tuple[bool, str, list[str]]:
     raw_output_dir = str(status.get("output_dir", "")).strip()
     if not raw_output_dir:
         return False, "output_dir is missing from status", []
@@ -69,6 +73,10 @@ def _verify_final_artifacts(status: dict[str, Any]) -> tuple[bool, str, list[str
         required["minutes"] = str(minutes)
     if files.get("docx"):
         required["docx"] = str(files["docx"])
+        if files.get("docx_qa"):
+            required["docx_qa"] = str(files["docx_qa"])
+        else:
+            return False, "final DOCX QA path is missing from status", []
     if files.get("snapshots"):
         required["snapshots"] = str(files["snapshots"])
 
@@ -76,6 +84,7 @@ def _verify_final_artifacts(status: dict[str, Any]) -> tuple[bool, str, list[str
         return False, "final media or Markdown path is missing from status", []
 
     output_root = output_dir.resolve()
+    job_root = job_dir.resolve()
     verified: list[str] = []
     for name, raw_path in required.items():
         path = Path(raw_path).expanduser()
@@ -85,8 +94,10 @@ def _verify_final_artifacts(status: dict[str, Any]) -> tuple[bool, str, list[str
         if not expected_type_exists:
             return False, f"final {name} artifact is missing", verified
         resolved = path.resolve()
-        if not _path_within(resolved, output_root):
-            return False, f"final {name} artifact is outside output_dir", verified
+        expected_root = job_root if name == "docx_qa" else output_root
+        if not _path_within(resolved, expected_root):
+            location = "job_dir" if name == "docx_qa" else "output_dir"
+            return False, f"final {name} artifact is outside {location}", verified
         verified.append(str(resolved))
     return True, "", verified
 
@@ -140,7 +151,10 @@ def inspect_completed_job(
             "remaining_seconds": remaining_seconds,
         }
 
-    verified, reason, verified_artifacts = _verify_final_artifacts(status)
+    verified, reason, verified_artifacts = _verify_final_artifacts(
+        status,
+        job_dir=job_dir,
+    )
     if not verified:
         return {
             "job": job_dir.name,
@@ -164,7 +178,7 @@ def cleanup_completed_job(
     job_dir: Path,
     *,
     apply: bool,
-    retention_hours: int = 24,
+    retention_hours: int = 0,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     inspected = inspect_completed_job(

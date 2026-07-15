@@ -14,6 +14,7 @@ if __package__ is None or __package__ == "":
 from scripts.config import load_settings
 from scripts.content_audit import validate_content_artifacts
 from scripts.media_types import is_video_extension
+from scripts.translation import resolve_final_markdown
 from scripts.utils import now_local, read_json, safe_filename, unique_path, write_json
 
 
@@ -29,9 +30,9 @@ def archive_job(
         raise FileNotFoundError(job_dir)
 
     source = find_source(job_dir)
-    minutes_path = job_dir / "minutes.md"
-    if not minutes_path.exists():
-        raise FileNotFoundError(minutes_path)
+    source_minutes_path = job_dir / "minutes.md"
+    if not source_minutes_path.exists():
+        raise FileNotFoundError(source_minutes_path)
     content_audit = validate_content_artifacts(
         job_dir,
         audit_mode=getattr(settings, "content_audit_mode", "off"),
@@ -43,6 +44,14 @@ def archive_job(
     )
     if content_audit["issues"]:
         print("warning: content audit issues: " + "; ".join(content_audit["issues"]))
+    if (
+        getattr(settings, "content_audit_mode", "off") == "strict"
+        and (job_dir / "evidence_chunks.json").is_file()
+    ):
+        from scripts.content_freeze import validate_content_freeze
+
+        validate_content_freeze(job_dir, revalidate_content=False)
+    minutes_path = resolve_final_markdown(job_dir)
 
     metadata = read_json(job_dir / "source_metadata.json")
     saved_date = extract_recording_date(job_dir, source)
@@ -55,13 +64,15 @@ def archive_job(
     )
     document_type = extract_document_type(minutes_path)
     output_root = Path(settings.output_dir).expanduser()
-    date_dir = output_root / saved_date
-    date_dir.mkdir(parents=True, exist_ok=True)
-    output_dir = unique_path(date_dir / safe_title)
-    staging_dir = unique_path(date_dir / f".{output_dir.name}.{job_dir.name}.partial")
+    output_root.mkdir(parents=True, exist_ok=True)
+    output_dir = unique_path(output_root / f"{saved_date}_{safe_title}")
+    staging_dir = unique_path(
+        output_root / f".{output_dir.name}.{job_dir.name}.partial"
+    )
     staging_dir.mkdir(parents=True, exist_ok=False)
-    final_stem = f"{saved_date}_{output_dir.name}"
+    final_stem = output_dir.name
     staged_source = staging_dir / f"{final_stem}{source.suffix.lower()}"
+    docx_qa_path: Path | None = None
     source_moved = False
     try:
         files = {
@@ -71,14 +82,17 @@ def archive_job(
             ),
         }
         if settings.docx_enabled:
-            from scripts.docx_report import generate_docx_report
-
-            files["docx"] = generate_docx_report(
-                files["minutes"],
-                staging_dir / f"{final_stem}.docx",
+            final_docx, docx_qa_path = prepare_docx_for_archive(
+                job_dir,
+                minutes_path,
+                settings=settings,
                 document_title=display_title,
                 document_type=document_type,
                 saved_date=saved_date,
+            )
+            files["docx"] = copy_required(
+                final_docx,
+                staging_dir / f"{final_stem}.docx",
             )
 
         snapshots_out = copy_snapshots(job_dir, staging_dir)
@@ -100,14 +114,19 @@ def archive_job(
         name: output_dir / path.relative_to(staging_dir)
         for name, path in files.items()
     }
+    # Raw frames and selected snapshots remain available for evidence review until
+    # the verified completed-job retention cleanup removes the whole job directory.
     cleaned_job_ocr_images = False
-    if settings.cleanup_job_ocr_images_after_archive:
-        cleaned_job_ocr_images = cleanup_job_ocr_images(job_dir)
+    retained_job_ocr_images = any(
+        (job_dir / dirname).exists() for dirname in ("frames", "snapshots")
+    )
 
     files_payload = {
         "source": str(source_out),
         **{name: str(path) for name, path in files.items()},
     }
+    if docx_qa_path is not None:
+        files_payload["docx_qa"] = str(docx_qa_path)
     if is_video_extension(source.suffix):
         files_payload["video"] = str(source_out)
     else:
@@ -135,9 +154,11 @@ def archive_job(
         "recording_date": saved_date,
         "completed_at": completed_at,
         "output_dir": str(output_dir),
-        "date_output_dir": str(output_dir.parent),
+        "output_root": str(output_root),
         "base_name": final_stem,
         "cleaned_job_ocr_images": cleaned_job_ocr_images,
+        "retained_job_ocr_images": retained_job_ocr_images,
+        "ocr_image_retention": "completed_job_retention",
         "cleaned_job_media": job_media_cleanup["cleaned"],
         "job_media_cleanup": job_media_cleanup,
         "reclaimed_bytes": job_media_cleanup["reclaimed_bytes"],
@@ -178,7 +199,7 @@ def archive_job(
         cleanup = cleanup_completed_jobs(
             Path(getattr(settings, "jobs_dir", job_dir.parent)),
             apply=True,
-            retention_hours=getattr(settings, "completed_job_retention_hours", 24),
+            retention_hours=getattr(settings, "completed_job_retention_hours", 0),
             excluded_jobs={job_dir},
         )
         if cleanup["purged_jobs"]:
@@ -204,6 +225,73 @@ def resolve_document_titles(
     )
     folder_title = safe_filename(display_title, max_length=80) or "콘텐츠-분석"
     return display_title, folder_title
+
+
+def prepare_docx_for_archive(
+    job_dir: Path,
+    markdown_path: Path,
+    *,
+    settings: object,
+    document_title: str,
+    document_type: str,
+    saved_date: str,
+) -> tuple[Path, Path]:
+    from scripts.docx_qa import create_docx_qa, validate_docx_qa
+    from scripts.docx_report import generate_docx_report
+
+    draft_path = job_dir / "minutes.draft.docx"
+    final_path = job_dir / "minutes.final.docx"
+    qa_path = job_dir / "docx_qa.json"
+    render_dir = job_dir / "docx_render"
+    require_visual = (
+        getattr(settings, "llm_provider", "") == "codex"
+        or getattr(settings, "content_audit_mode", "off") == "strict"
+    )
+
+    if require_visual:
+        for required in (draft_path, final_path, qa_path):
+            if not required.is_file():
+                raise FileNotFoundError(
+                    "Codex/strict DOCX archive requires Documents finalization: "
+                    f"missing {required.name}"
+                )
+        validate_docx_qa(
+            markdown_path,
+            final_path,
+            qa_path,
+            require_visual=True,
+            require_visual_review=(job_dir / "content_freeze.json").is_file(),
+        )
+        return final_path, qa_path
+
+    if not draft_path.is_file():
+        generate_docx_report(
+            markdown_path,
+            draft_path,
+            document_title=document_title,
+            document_type=document_type,
+            saved_date=saved_date,
+        )
+    if not final_path.is_file():
+        shutil.copy2(draft_path, final_path)
+    if not qa_path.is_file():
+        render_dir.mkdir(parents=True, exist_ok=True)
+        create_docx_qa(
+            markdown_path,
+            draft_path,
+            final_path,
+            render_dir=render_dir,
+            visual_status="not_run",
+            output_path=qa_path,
+            renderer="not_run_non_codex_fallback",
+        )
+    validate_docx_qa(
+        markdown_path,
+        final_path,
+        qa_path,
+        require_visual=False,
+    )
+    return final_path, qa_path
 
 
 def resolve_meeting_titles(
@@ -322,9 +410,8 @@ def update_processed_index(
 
 
 def make_meeting_output_dir(output_root: Path, saved_date: str, meeting_folder_name: str) -> Path:
-    date_dir = output_root / saved_date
-    date_dir.mkdir(parents=True, exist_ok=True)
-    meeting_dir = unique_path(date_dir / meeting_folder_name)
+    output_root.mkdir(parents=True, exist_ok=True)
+    meeting_dir = unique_path(output_root / f"{saved_date}_{meeting_folder_name}")
     meeting_dir.mkdir(parents=True, exist_ok=True)
     return meeting_dir
 

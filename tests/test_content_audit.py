@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -10,6 +11,66 @@ from scripts.utils import write_json
 
 
 def write_valid_artifacts(job_dir: Path) -> None:
+    (job_dir / "source.mov").write_bytes(b"video")
+    frames_dir = job_dir / "frames"
+    snapshots_dir = job_dir / "snapshots"
+    frames_dir.mkdir()
+    snapshots_dir.mkdir()
+    raw_frame = frames_dir / "frame_000001.jpg"
+    snapshot = snapshots_dir / "snapshot_0001_00-01-10.jpg"
+    raw_frame.write_bytes(b"frame-evidence")
+    snapshot.write_bytes(b"frame-evidence")
+    evidence_hash = hashlib.sha256(b"frame-evidence").hexdigest()
+    write_json(
+        job_dir / "transcript.json",
+        {
+            "segments": [
+                {"start": 50.0, "end": 130.0, "text": "recorded evidence"}
+            ]
+        },
+    )
+    write_json(
+        job_dir / "screen_text.json",
+        {
+            "frames": [
+                {
+                    "timestamp_seconds": 70,
+                    "timestamp": "00:01:10",
+                    "snapshot": str(snapshot),
+                    "text": "Version 8.0",
+                }
+            ]
+        },
+    )
+    write_json(
+        job_dir / "evidence_coverage.json",
+        {
+            "schema_version": 1,
+            "status": "completed",
+            "coverage_passed": True,
+            "accounting_complete": True,
+            "raw_frame_count": 1,
+            "selected_snapshot_count": 1,
+            "accounted_frame_count": 1,
+            "max_snapshot_gap_limit_seconds": 120,
+            "max_selected_snapshot_gap_seconds": 0,
+            "reason_counts": {"selected": 1},
+            "frames": [
+                {
+                    "evidence_id": "frame-000001",
+                    "source_frame": raw_frame.name,
+                    "timestamp_seconds": 70,
+                    "raw_frame": "frames/frame_000001.jpg",
+                    "raw_frame_sha256": evidence_hash,
+                    "selected": True,
+                    "reason": "selected",
+                    "snapshot_evidence_id": "snapshot-0001",
+                    "snapshot": "snapshots/snapshot_0001_00-01-10.jpg",
+                    "snapshot_sha256": evidence_hash,
+                }
+            ],
+        },
+    )
     (job_dir / "minutes.md").write_text(
         "# Version support\n\n"
         "Version 8.0 support ends in April 2027.\n\n"
@@ -33,7 +94,11 @@ def write_valid_artifacts(job_dir: Path) -> None:
                     "statement": "Version 8.0 support ends in April 2027.",
                     "importance": "required",
                     "qualifier": "recording_claim",
-                    "source_refs": ["STT:00:01:00", "OCR:00:01:10"],
+                    "source_refs": [
+                        "STT:00:01:00-00:02:00",
+                        "OCR:00:01:10",
+                        "Snapshot:snapshot-0001@00:01:10",
+                    ],
                     "official_verification": "required",
                 },
                 {
@@ -152,6 +217,69 @@ class ContentAuditTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "missing content_inventory.json"):
                 validate_content_artifacts(
                     Path(temp_dir),
+                    audit_mode="strict",
+                    official_source_verification="required",
+                )
+
+    def test_strict_audit_rejects_tampered_raw_frame_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            write_valid_artifacts(job_dir)
+            (job_dir / "frames" / "frame_000001.jpg").write_bytes(b"tampered")
+
+            with self.assertRaisesRegex(ValueError, "raw frame hash does not match"):
+                validate_content_artifacts(
+                    job_dir,
+                    audit_mode="strict",
+                    official_source_verification="required",
+                )
+
+    def test_strict_audit_rejects_snapshot_gap_over_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            write_valid_artifacts(job_dir)
+            coverage_path = job_dir / "evidence_coverage.json"
+            coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+            coverage["max_selected_snapshot_gap_seconds"] = 121
+            write_json(coverage_path, coverage)
+
+            with self.assertRaisesRegex(ValueError, "maximum snapshot gap"):
+                validate_content_artifacts(
+                    job_dir,
+                    audit_mode="strict",
+                    official_source_verification="required",
+                )
+
+    def test_inventory_timestamp_ref_must_resolve_to_collected_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            write_valid_artifacts(job_dir)
+            inventory_path = job_dir / "content_inventory.json"
+            inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+            inventory["items"][0]["source_refs"][0] = (
+                "STT:00:09:00-00:09:10"
+            )
+            write_json(inventory_path, inventory)
+
+            with self.assertRaisesRegex(ValueError, "evidence ref does not resolve"):
+                validate_content_artifacts(
+                    job_dir,
+                    audit_mode="strict",
+                    official_source_verification="required",
+                )
+
+    def test_visual_only_inventory_item_requires_snapshot_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            write_valid_artifacts(job_dir)
+            inventory_path = job_dir / "content_inventory.json"
+            inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+            inventory["items"][0]["source_refs"] = ["OCR:00:01:10"]
+            write_json(inventory_path, inventory)
+
+            with self.assertRaisesRegex(ValueError, "requires a Snapshot ref"):
+                validate_content_artifacts(
+                    job_dir,
                     audit_mode="strict",
                     official_source_verification="required",
                 )

@@ -31,6 +31,15 @@ print(len(links), len(bookmarks), missing)
 
 Expected: non-zero link/bookmark counts and `missing == []`.
 
+When the combined H2/H3 navigation list is dense, keep all body headings and bookmarks but
+collapse the visible TOC to top-level content headings. This preserves content-derived depth
+without creating a mostly blank spillover TOC page.
+
+## Checklist Rendering
+
+Markdown task items must render as real checkbox glyphs: `- [ ]` becomes `☐` and `- [x]`
+becomes `☑`. A shipped DOCX must not expose literal `[ ]` or `[x]` markers.
+
 ## Table Geometry
 
 For each table:
@@ -44,7 +53,20 @@ Use the current Documents skill `scripts/table_geometry.py` helper.
 
 ## Render QA
 
-Use `scripts/render_docx_checked.py`, which delegates to the newest installed Documents skill renderer and supplies the optional `pdf2image` dependency through an isolated `uv` runtime when needed:
+For a content-frozen media job, use `scripts/finalize_docx.py`, which validates the freeze and
+combines generation, render-directory cleanup, full rendering, and structural QA:
+
+```bash
+python scripts/finalize_docx.py prepare /path/to/job
+```
+
+After inspecting every latest page at 100%, write `visual_review.json` and run:
+
+```bash
+python scripts/finalize_docx.py approve /path/to/job
+```
+
+Use `scripts/render_docx_checked.py` directly only when debugging the renderer. It delegates to the newest installed Documents skill renderer and supplies the optional `pdf2image` dependency through an isolated `uv` runtime when needed:
 
 ```bash
 python scripts/render_docx_checked.py \
@@ -67,4 +89,8 @@ pdftoppm -png /private/tmp/minutes-docx-render/file.pdf \
   /private/tmp/minutes-docx-render/page
 ```
 
-Inspect every rendered page with `view_image`, including the cover, TOC, all tables, and final page.
+Inspect every rendered page with `view_image`, including the cover, TOC, all tables, and final
+page. Reject clipping/overlap, missing glyph or content, a blank interior page, broken navigation,
+an unreadable table, literal task-list markers, or an orphan heading/split row. Treat a short final
+page, whitespace on one TOC page, intentional section whitespace, and mild readable wrapping as
+nonblocking warnings. Warnings alone do not authorize content changes or another render.

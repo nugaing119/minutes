@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 from docx import Document
 from docx.enum.section import WD_SECTION
@@ -22,11 +24,26 @@ GRAY_LIGHT = "F2F2F2"
 ORANGE_LIGHT = "FFF3E0"
 BORDER = "CCCCCC"
 WHITE = "FFFFFF"
-BODY_FONT = "Arial"
+DOCUMENTS_PRESET = "standard_business_brief"
+HEADER_PATTERN = "editorial_cover"
+BODY_FONT = "Calibri"
 CODE_FONT = "Courier New"
+TOC_DETAIL_ENTRY_LIMIT = 24
+CHECKBOX_ITEM_PATTERN = re.compile(r"^\[(?P<mark>[ xX])\]\s+(?P<text>.+)$")
 INLINE_MARKDOWN_PATTERN = re.compile(
-    r"`(?P<code>[^`]+)`|\[(?P<link_text>[^\]]+)\]\((?P<link_url>https?://[^)]+)\)"
+    r"`(?P<code>[^`]+)`"
+    r"|\[(?P<link_text>[^\]]+)\]\((?P<link_url>https?://[^)]+)\)"
+    r"|\*\*(?P<strong>.+?)\*\*"
+    r"|(?<!\*)\*(?P<emphasis>[^*]+?)\*(?!\*)"
 )
+INTERNAL_CITATION_PATTERN = re.compile(
+    r":codex-file-citation\{|cite|\bturn\d+(?:search|fetch|view)\d+\b",
+    re.I,
+)
+DOCUMENT_UI_LABELS = {
+    "en": {"contents": "Contents", "recorded": "Recorded"},
+    "ko": {"contents": "목차", "recorded": "기록일"},
+}
 
 
 @dataclass
@@ -53,6 +70,7 @@ def generate_docx_report(
     meeting_title: str | None = None,
 ) -> Path:
     markdown = markdown_path.read_text(encoding="utf-8")
+    validate_supported_markdown(markdown)
     blocks = parse_markdown(markdown)
     title_index = first_document_title_index(blocks)
     markdown_title = blocks[title_index].text if title_index is not None else ""
@@ -63,6 +81,7 @@ def generate_docx_report(
         or output_path.stem
     )
     resolved_type = (document_type or "").strip() or extract_document_type(markdown)
+    document_language = detect_document_language(markdown)
     heading_anchors = build_heading_anchors(blocks, title_index=title_index)
     heading_numbers, numbering_base_level = build_heading_numbers(
         blocks,
@@ -82,13 +101,20 @@ def generate_docx_report(
         else None
     )
     add_header_footer(doc)
-    add_cover(doc, resolved_title, saved_date, resolved_type)
+    add_cover(
+        doc,
+        resolved_title,
+        saved_date,
+        resolved_type,
+        document_language=document_language,
+    )
     add_static_toc(
         doc,
         blocks,
         heading_anchors,
         heading_numbers=heading_numbers if use_automatic_heading_numbers else {},
         title_index=title_index,
+        document_language=document_language,
     )
     add_body(
         doc,
@@ -132,12 +158,33 @@ def parse_markdown(markdown: str) -> list[MarkdownBlock]:
             blocks.append(MarkdownBlock(kind="table", table=table))
             continue
 
-        if line.lstrip().startswith("- "):
+        if line.lstrip().startswith(">"):
+            quote_lines = []
+            while index < len(lines) and lines[index].lstrip().startswith(">"):
+                quote_lines.append(lines[index].lstrip()[1:].lstrip())
+                index += 1
+            blocks.append(MarkdownBlock(kind="blockquote", text=" ".join(quote_lines)))
+            continue
+
+        if re.match(r"^\s*[-*]\s+", line):
             items = []
-            while index < len(lines) and lines[index].lstrip().startswith("- "):
-                items.append(lines[index].lstrip()[2:].strip())
+            while index < len(lines) and re.match(r"^\s*[-*]\s+", lines[index]):
+                items.append(re.sub(r"^\s*[-*]\s+", "", lines[index]).strip())
                 index += 1
             blocks.append(MarkdownBlock(kind="bullets", items=items))
+            continue
+
+        if re.match(r"^\s*\d+[.)]\s+", line):
+            items = []
+            while index < len(lines) and re.match(
+                r"^\s*\d+[.)]\s+",
+                lines[index],
+            ):
+                items.append(
+                    re.sub(r"^\s*\d+[.)]\s+", "", lines[index]).strip()
+                )
+                index += 1
+            blocks.append(MarkdownBlock(kind="numbered", items=items))
             continue
 
         paragraph_lines = [line.strip()]
@@ -148,12 +195,26 @@ def parse_markdown(markdown: str) -> list[MarkdownBlock]:
                 break
             if re.match(r"^(#{1,6})\s+(.+)$", next_line):
                 break
-            if next_line.lstrip().startswith("- ") or is_table_start(lines, index):
+            if (
+                re.match(r"^\s*[-*]\s+", next_line)
+                or re.match(r"^\s*\d+[.)]\s+", next_line)
+                or next_line.lstrip().startswith(">")
+                or is_table_start(lines, index)
+            ):
                 break
             paragraph_lines.append(next_line.strip())
             index += 1
         blocks.append(MarkdownBlock(kind="paragraph", text=" ".join(paragraph_lines)))
     return blocks
+
+
+def validate_supported_markdown(markdown: str) -> None:
+    if INTERNAL_CITATION_PATTERN.search(markdown):
+        raise ValueError("internal Codex citation tokens are not allowed in DOCX source")
+    if markdown.count("**") % 2:
+        raise ValueError("unbalanced bold Markdown marker: **")
+    if markdown.count("`") % 2:
+        raise ValueError("unbalanced inline code Markdown marker: `")
 
 
 def is_table_start(lines: list[str], index: int) -> bool:
@@ -195,6 +256,14 @@ def extract_document_type(markdown: str) -> str:
         if match:
             return match.group(1).strip()
     return ""
+
+
+def detect_document_language(markdown: str) -> str:
+    if re.search(r"(?im)^\s*Document type\s*:", markdown):
+        return "en"
+    if re.search(r"(?m)^\s*문서 유형\s*:", markdown):
+        return "ko"
+    return "ko" if re.search(r"[가-힣]", markdown) else "en"
 
 
 def build_heading_anchors(
@@ -367,35 +436,48 @@ def configure_document(doc: Document) -> None:
     section = doc.sections[0]
     section.page_width = Inches(8.5)
     section.page_height = Inches(11)
-    section.top_margin = Inches(0.69)
-    section.bottom_margin = Inches(0.69)
-    section.left_margin = Inches(0.69)
-    section.right_margin = Inches(0.69)
-    section.header_distance = Inches(0.49)
-    section.footer_distance = Inches(0.49)
+    section.top_margin = Inches(1.0)
+    section.bottom_margin = Inches(1.0)
+    section.left_margin = Inches(1.0)
+    section.right_margin = Inches(1.0)
+    section.header_distance = Inches(0.492)
+    section.footer_distance = Inches(0.492)
 
 
 def configure_styles(doc: Document) -> None:
     normal = doc.styles["Normal"]
     normal.font.name = BODY_FONT
     normal._element.rPr.rFonts.set(qn("w:eastAsia"), BODY_FONT)
-    normal.font.size = Pt(9.5)
-    normal.paragraph_format.space_after = Pt(5)
-    normal.paragraph_format.line_spacing = 1.08
+    normal.font.size = Pt(11)
+    normal.paragraph_format.space_before = Pt(0)
+    normal.paragraph_format.space_after = Pt(6)
+    normal.paragraph_format.line_spacing = 1.10
 
-    bullet = doc.styles["List Bullet"]
-    bullet.font.name = BODY_FONT
-    bullet._element.rPr.rFonts.set(qn("w:eastAsia"), BODY_FONT)
-    bullet.font.size = Pt(9.5)
-    bullet.paragraph_format.left_indent = Inches(0.32)
-    bullet.paragraph_format.first_line_indent = Inches(-0.18)
-    bullet.paragraph_format.space_after = Pt(4)
-    bullet.paragraph_format.line_spacing = 1.08
+    for list_style_name in ("List Bullet", "List Number"):
+        list_style = doc.styles[list_style_name]
+        list_style.font.name = BODY_FONT
+        list_style._element.rPr.rFonts.set(qn("w:eastAsia"), BODY_FONT)
+        list_style.font.size = Pt(11)
+        list_style.paragraph_format.left_indent = Inches(0.5)
+        list_style.paragraph_format.first_line_indent = Inches(-0.25)
+        list_style.paragraph_format.space_after = Pt(8)
+        list_style.paragraph_format.line_spacing = 1.167
+
+    quote = doc.styles["Quote"]
+    quote.font.name = BODY_FONT
+    quote._element.rPr.rFonts.set(qn("w:eastAsia"), BODY_FONT)
+    quote.font.size = Pt(11)
+    quote.font.color.rgb = RGBColor.from_string(BLUE_DARK)
+    quote.paragraph_format.left_indent = Inches(0.25)
+    quote.paragraph_format.right_indent = Inches(0.10)
+    quote.paragraph_format.space_before = Pt(4)
+    quote.paragraph_format.space_after = Pt(8)
+    quote.paragraph_format.line_spacing = 1.10
 
     for style_name, size, color, before, after in (
-        ("Heading 1", 16, BLUE_DARK, 20, 10),
-        ("Heading 2", 13, BLUE, 13, 6),
-        ("Heading 3", 11, BLUE_DARK, 10, 5),
+        ("Heading 1", 16, BLUE, 16, 8),
+        ("Heading 2", 13, BLUE, 12, 6),
+        ("Heading 3", 12, BLUE_DARK, 8, 4),
     ):
         style = doc.styles[style_name]
         style.font.name = BODY_FONT
@@ -438,6 +520,8 @@ def add_cover(
     document_title: str,
     saved_date: str,
     document_type: str = "",
+    *,
+    document_language: str = "ko",
 ) -> None:
     for _ in range(5):
         doc.add_paragraph("")
@@ -466,7 +550,8 @@ def add_cover(
 
     meta = doc.add_paragraph()
     meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    meta_run = meta.add_run(f"작성일 : {saved_date}")
+    recorded_label = DOCUMENT_UI_LABELS[document_language]["recorded"]
+    meta_run = meta.add_run(f"{recorded_label}: {saved_date}")
     meta_run.font.name = BODY_FONT
     meta_run.font.size = Pt(9.5)
     meta_run.font.color.rgb = RGBColor.from_string("666666")
@@ -514,12 +599,29 @@ def add_static_toc(
     *,
     heading_numbers: dict[int, str] | None = None,
     title_index: int | None = None,
+    document_language: str = "ko",
 ) -> None:
     heading_numbers = heading_numbers or {}
-    heading = doc.add_paragraph("목차", style="Heading 1")
+    contents_label = DOCUMENT_UI_LABELS[document_language]["contents"]
+    heading = doc.add_paragraph(contents_label, style="Heading 1")
     add_bottom_border(heading, BLUE, "6")
+    candidate_indexes = [
+        index
+        for index, block in enumerate(blocks)
+        if block.kind == "heading"
+        and block.level <= 3
+        and index != title_index
+    ]
+    visible_indexes = set(candidate_indexes)
+    if len(candidate_indexes) > TOC_DETAIL_ENTRY_LIMIT:
+        top_level = min(blocks[index].level for index in candidate_indexes)
+        visible_indexes = {
+            index
+            for index in candidate_indexes
+            if blocks[index].level == top_level
+        }
     for index, block in enumerate(blocks):
-        if block.kind != "heading" or block.level > 3 or index == title_index:
+        if index not in visible_indexes:
             continue
         text = (
             numbered_heading_text(heading_numbers[index], block.text)
@@ -574,18 +676,57 @@ def add_body(
         elif block.kind == "bullets":
             for item in block.items or []:
                 add_bullet(doc, item)
+        elif block.kind == "numbered":
+            for item in block.items or []:
+                add_numbered_item(doc, item)
+        elif block.kind == "blockquote":
+            add_blockquote(doc, block.text)
         elif block.kind == "table" and block.table is not None:
             add_table(doc, block.table)
 
 
 def add_paragraph(doc: Document, text: str) -> None:
     paragraph = doc.add_paragraph()
-    add_inline_markdown(paragraph, text, size=9.5)
+    add_inline_markdown(paragraph, text, size=11)
 
 
 def add_bullet(doc: Document, text: str) -> None:
+    checkbox = CHECKBOX_ITEM_PATTERN.match(text)
+    if checkbox:
+        add_checklist_item(
+            doc,
+            checkbox.group("text"),
+            checked=checkbox.group("mark").lower() == "x",
+        )
+        return
     paragraph = doc.add_paragraph(style="List Bullet")
-    add_inline_markdown(paragraph, text, size=9.5)
+    add_inline_markdown(paragraph, text, size=11)
+
+
+def add_checklist_item(doc: Document, text: str, *, checked: bool) -> None:
+    paragraph = doc.add_paragraph()
+    paragraph.paragraph_format.left_indent = Inches(0.5)
+    paragraph.paragraph_format.first_line_indent = Inches(-0.25)
+    paragraph.paragraph_format.space_after = Pt(8)
+    paragraph.paragraph_format.line_spacing = 1.167
+    add_formatted_run(
+        paragraph,
+        "☑ " if checked else "☐ ",
+        size=11,
+        bold=False,
+        color="000000",
+    )
+    add_inline_markdown(paragraph, text, size=11)
+
+
+def add_numbered_item(doc: Document, text: str) -> None:
+    paragraph = doc.add_paragraph(style="List Number")
+    add_inline_markdown(paragraph, text, size=11)
+
+
+def add_blockquote(doc: Document, text: str) -> None:
+    paragraph = doc.add_paragraph(style="Quote")
+    add_inline_markdown(paragraph, text, size=11)
 
 
 def add_inline_markdown(
@@ -614,12 +755,29 @@ def add_inline_markdown(
                 color=color,
                 font=CODE_FONT,
             )
-        else:
+        elif match.group("link_text") is not None:
             add_external_hyperlink(
                 paragraph,
                 match.group("link_text"),
                 match.group("link_url"),
                 size=size,
+            )
+        elif match.group("strong") is not None:
+            add_formatted_run(
+                paragraph,
+                match.group("strong"),
+                size=size,
+                bold=True,
+                color=color,
+            )
+        else:
+            add_formatted_run(
+                paragraph,
+                match.group("emphasis"),
+                size=size,
+                bold=bold,
+                color=color,
+                italic=True,
             )
         position = match.end()
     add_formatted_run(
@@ -639,6 +797,7 @@ def add_formatted_run(
     bold: bool,
     color: str,
     font: str = BODY_FONT,
+    italic: bool = False,
 ) -> None:
     if not text:
         return
@@ -649,6 +808,7 @@ def add_formatted_run(
     run._element.rPr.rFonts.set(qn("w:eastAsia"), font)
     run.font.size = Pt(size)
     run.font.bold = bold
+    run.font.italic = italic
     run.font.color.rgb = RGBColor.from_string(color)
 
 
@@ -745,8 +905,14 @@ def add_table(doc: Document, table: MarkdownTable) -> None:
     set_table_cell_margins(word_table, 80, 120)
     for idx, cell in enumerate(word_table.rows[0].cells):
         set_cell_width(cell, widths[idx])
-        set_cell_fill(cell, BLUE_DARK)
-        set_cell_text(cell, table.headers[idx], bold=True, color=WHITE, align=WD_ALIGN_PARAGRAPH.CENTER)
+        set_cell_fill(cell, GRAY_LIGHT)
+        set_cell_text(
+            cell,
+            table.headers[idx],
+            bold=True,
+            color=BLUE_DARK,
+            align=WD_ALIGN_PARAGRAPH.CENTER,
+        )
     set_repeat_table_header(word_table.rows[0])
     set_row_cant_split(word_table.rows[0])
 
@@ -754,12 +920,9 @@ def add_table(doc: Document, table: MarkdownTable) -> None:
         cells = word_table.rows[row_index].cells
         for idx, cell in enumerate(cells):
             set_cell_width(cell, widths[idx])
-            if idx == 0:
-                set_cell_fill(cell, BLUE_LIGHT)
-            elif row_index % 2 == 0:
-                set_cell_fill(cell, GRAY_LIGHT)
             set_cell_text(cell, row_values[idx] if idx < len(row_values) else "")
-        set_row_cant_split(word_table.rows[row_index])
+        if sum(len(value) for value in row_values) <= 320:
+            set_row_cant_split(word_table.rows[row_index])
     doc.add_paragraph("")
 
 
@@ -772,6 +935,11 @@ def column_widths(count: int) -> list[int]:
         return [2600, 3380, 3380]
     if count == 4:
         return [2300, 3200, 1800, 2060]
+    if count == 5:
+        # Keep short categorical headers such as "Priority" on one line after
+        # cell padding is applied. The previous 800-twip first column left too
+        # little usable width and allowed Word to split the header mid-word.
+        return [900, 2115, 2115, 2115, 2115]
     total = 9360
     first = 800
     rest = int((total - first) / (count - 1))
@@ -791,10 +959,11 @@ def set_cell_text(
     paragraph.alignment = align
     paragraph.paragraph_format.space_before = Pt(1)
     paragraph.paragraph_format.space_after = Pt(1)
+    paragraph.paragraph_format.line_spacing = 1.10
     add_inline_markdown(
         paragraph,
         text,
-        size=8.5,
+        size=9.5,
         bold=bold,
         color=color,
     )
@@ -960,3 +1129,27 @@ def add_field(paragraph, field: str) -> None:
     run._r.append(fld_char_begin)
     run._r.append(instr_text)
     run._r.append(fld_char_end)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate a deterministic Documents-preset DOCX draft from Markdown."
+    )
+    parser.add_argument("markdown", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--title")
+    parser.add_argument("--document-type")
+    parser.add_argument("--saved-date", default="")
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    result = generate_docx_report(
+        args.markdown,
+        args.output,
+        document_title=args.title,
+        document_type=args.document_type,
+        saved_date=args.saved_date,
+    )
+    print(result)
+
+
+if __name__ == "__main__":
+    main()
