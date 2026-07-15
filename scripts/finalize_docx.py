@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -23,12 +24,14 @@ MANIFEST_NAME = "docx_finalize_manifest.json"
 VISUAL_REVIEW_NAME = "visual_review.json"
 MAX_NORMAL_RENDER_ATTEMPTS = 2
 MAX_RENDER_ATTEMPTS = 3
+MAX_RENDERER_REPAIR_ATTEMPTS = 1
 BLOCKING_DEFECT_CODES = {
     "BLANK_INTERIOR_PAGE",
     "BROKEN_TOC_OR_BOOKMARK",
     "CLIPPED_OR_OVERLAPPING_TEXT",
     "MISSING_CONTENT",
     "MISSING_GLYPH",
+    "INCORRECT_LIST_NUMBERING",
     "ORPHAN_HEADING_OR_SPLIT_ROW",
     "UNREADABLE_TABLE",
 }
@@ -51,12 +54,26 @@ def _clean_render_dir(render_dir: Path) -> None:
     render_dir.mkdir(parents=True, exist_ok=False)
 
 
+def _renderer_fingerprint() -> str:
+    digest = hashlib.sha256()
+    for path in (
+        Path(__file__).with_name("docx_report.py"),
+        Path(__file__).with_name("render_docx_checked.py"),
+    ):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _next_attempt(
     previous: dict[str, Any],
     *,
     final_markdown_sha256: str,
     blocking_defect_code: str | None,
-) -> tuple[int, list[dict[str, Any]]]:
+    renderer_fingerprint: str,
+) -> tuple[int, list[dict[str, Any]], bool]:
     history = previous.get("history", [])
     previous_markdown_sha256 = previous.get(
         "final_markdown_sha256",
@@ -68,16 +85,32 @@ def _next_attempt(
     ):
         history = []
     attempt = len(history) + 1
+    renderer_repair = False
     if attempt > MAX_RENDER_ATTEMPTS:
-        raise ValueError(f"DOCX render attempts must not exceed {MAX_RENDER_ATTEMPTS}")
+        prior_renderer = previous.get("renderer_fingerprint")
+        renderer_repair_count = sum(
+            record.get("renderer_repair") is True
+            for record in history
+            if isinstance(record, dict)
+        )
+        renderer_repair = (
+            blocking_defect_code in BLOCKING_DEFECT_CODES
+            and prior_renderer != renderer_fingerprint
+            and renderer_repair_count < MAX_RENDERER_REPAIR_ATTEMPTS
+        )
+        if not renderer_repair:
+            raise ValueError(
+                f"DOCX render attempts must not exceed {MAX_RENDER_ATTEMPTS}; "
+                "one additional blocking-defect repair is allowed only after the renderer changes"
+            )
     if attempt > MAX_NORMAL_RENDER_ATTEMPTS:
         if blocking_defect_code not in BLOCKING_DEFECT_CODES:
             raise ValueError(
-                "a third DOCX render requires an explicit blocking defect code"
+                "a third DOCX render, or a renderer-repair render, requires an explicit blocking defect code"
             )
     elif blocking_defect_code is not None:
         raise ValueError("blocking defect code is only accepted for a third render")
-    return attempt, list(history)
+    return attempt, list(history), renderer_repair
 
 
 def prepare_docx(
@@ -94,10 +127,12 @@ def prepare_docx(
     final_markdown_sha256 = sha256_file(markdown_path)
     manifest_path = job_dir / MANIFEST_NAME
     previous = read_json(manifest_path)
-    attempt, history = _next_attempt(
+    renderer_fingerprint = _renderer_fingerprint()
+    attempt, history, renderer_repair = _next_attempt(
         previous,
         final_markdown_sha256=final_markdown_sha256,
         blocking_defect_code=blocking_defect_code,
+        renderer_fingerprint=renderer_fingerprint,
     )
 
     draft_path = job_dir / "minutes.draft.docx"
@@ -145,6 +180,8 @@ def prepare_docx(
         "prepared_at": now_local().isoformat(),
         "reuse_final": reuse_final,
         "blocking_defect_code": blocking_defect_code,
+        "renderer_fingerprint": renderer_fingerprint,
+        "renderer_repair": renderer_repair,
         "final_docx_sha256": qa["final_docx"]["sha256"],
         "render_manifest_sha256": rendered["manifest_sha256"],
         "page_count": rendered["page_count"],
@@ -158,6 +195,8 @@ def prepare_docx(
         "attempt": attempt,
         "normal_attempt_limit": MAX_NORMAL_RENDER_ATTEMPTS,
         "absolute_attempt_limit": MAX_RENDER_ATTEMPTS,
+        "renderer_repair_limit": MAX_RENDERER_REPAIR_ATTEMPTS,
+        "renderer_fingerprint": renderer_fingerprint,
         "draft_docx": file_record(draft_path),
         "final_docx": file_record(final_path),
         "render": render_record(render_dir, visual_status="not_run"),

@@ -16,9 +16,13 @@ from scripts.docx_report import generate_docx_report
 from scripts.run_fresh_codex_job import (
     CodexStreamSummary,
     DEFAULT_REASONING_EFFORT,
+    DRY_RUN_CONSOLE_BUDGET_BYTES,
     FRESH_CONTEXT_ENV,
+    TOOL_OUTPUT_BUDGET_EXIT_CODE,
+    WORKER_DOCUMENTS_PLUGIN_CONFIG,
     aggregate_phase_records,
     build_delivery_prompt,
+    build_dry_run_summary,
     build_fresh_codex_command,
     build_fresh_prompt,
     build_translation_prompt,
@@ -38,6 +42,52 @@ from scripts.run_fresh_codex_job import (
 
 
 class FreshCodexJobTests(unittest.TestCase):
+    def test_dry_run_summary_omits_prompt_and_evidence_bodies(self) -> None:
+        manifest = {
+            "schema_version": 6,
+            "state": "dry_run",
+            "job_dir": "/tmp/minutes/jobs/job-1",
+            "policy": {"output_language": "ko"},
+            "request_overrides": ["PRIVATE REQUEST"],
+            "ephemeral_session": True,
+            "planned_ephemeral_session_count": 2,
+            "planned_phases": ["content", "delivery"],
+            "phase_isolation": {"content_reads_raw_evidence": True},
+            "worker_contract": {"mode": "preloaded_compact"},
+            "parent_conversation_inherited": False,
+            "raw_evidence_embedded_in_handoff": False,
+            "handoff_prompt_bytes": {"content": 7_000, "delivery": 6_000},
+            "handoff_prompt_sha256": {"content": "a" * 64, "delivery": "b" * 64},
+            "evidence": {
+                "files": [
+                    {
+                        "path": "/private/raw/transcript.txt",
+                        "bytes": 123,
+                        "sha256": "c" * 64,
+                    }
+                ],
+                "snapshot_count": 10,
+                "raw_frame_count": 50,
+                "total_bytes": 999,
+            },
+            "runtime": {"model": "gpt-test", "reasoning_effort": "high"},
+            "translation_runtime": None,
+            "commands": {"content": ["codex", "exec", "<prompt-via-stdin>"]},
+        }
+
+        summary = build_dry_run_summary(manifest)
+        rendered = json.dumps(summary, ensure_ascii=False, indent=2)
+
+        self.assertNotIn("PRIVATE REQUEST", rendered)
+        self.assertNotIn("/private/raw/transcript.txt", rendered)
+        self.assertNotIn("evidence", summary.get("omitted_from_console", [])[:3])
+        self.assertEqual(summary["request_override_count"], 1)
+        self.assertEqual(summary["evidence_summary"]["file_count"], 1)
+        self.assertLessEqual(
+            len(rendered.encode("utf-8")),
+            DRY_RUN_CONSOLE_BUDGET_BYTES,
+        )
+
     def test_prompt_passes_paths_and_policy_without_copying_raw_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -61,7 +111,7 @@ class FreshCodexJobTests(unittest.TestCase):
                 request_overrides=("CPU와 총 소요시간을 보고",),
             )
 
-        self.assertIn("$minutes fresh-context content worker", prompt)
+        self.assertIn("preloaded compact content contract", prompt)
         self.assertIn(str(job / "codex_minutes_input.md"), prompt)
         self.assertIn("FINAL_OUTPUT_LANGUAGE=ko", prompt)
         self.assertIn("CONTENT_OUTPUT_LANGUAGE=auto", prompt)
@@ -77,7 +127,8 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertIn("Do not read or print evidence_coverage.json", prompt)
         self.assertIn("Do not read or print fresh_codex_handoff.json", prompt)
         self.assertIn("Do not recursively list the job directory", prompt)
-        self.assertIn("references/quality-loop.md", prompt)
+        self.assertIn("Do not open SKILL.md", prompt)
+        self.assertIn("Do not open quality-loop.md", prompt)
         self.assertIn("reader-facing document blueprint", prompt)
         self.assertIn("ledger/inventory → blueprint", prompt)
         self.assertIn("Structural validity alone is not a quality pass", prompt)
@@ -89,8 +140,9 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertIn("unittest discover", prompt)
         self.assertIn("Do not inspect validator implementations or tests", prompt)
         self.assertIn("Do not reread", prompt)
+        self.assertNotIn("$minutes", prompt)
         self.assertNotIn(sentinel, prompt)
-        self.assertLess(len(prompt.encode("utf-8")), 5_000)
+        self.assertLess(len(prompt.encode("utf-8")), 8_000)
 
     def test_delivery_prompt_uses_only_frozen_content_and_bounded_docx_loop(self) -> None:
         prompt = build_delivery_prompt(
@@ -99,7 +151,9 @@ class FreshCodexJobTests(unittest.TestCase):
             policy={"output_language": "ko", "detected_language": "en"},
         )
 
-        self.assertIn("$documents", prompt)
+        self.assertIn("preloaded compact delivery contract", prompt)
+        self.assertIn("bundled Documents renderer", prompt)
+        self.assertIn("Do not open any SKILL.md", prompt)
         self.assertIn("content_freeze.json", prompt)
         self.assertIn("minutes.translated.md", prompt)
         self.assertIn("translation.py", prompt)
@@ -110,7 +164,9 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertIn("nonblocking warnings", prompt)
         self.assertIn("--blocking-defect-code", prompt)
         self.assertIn("archive_job.py", prompt)
-        self.assertLess(len(prompt.encode("utf-8")), 5_000)
+        self.assertNotIn("$documents", prompt)
+        self.assertNotIn("$minutes", prompt)
+        self.assertLess(len(prompt.encode("utf-8")), 8_000)
 
     def test_translation_prompt_is_one_pass_and_preserves_protected_literals(self) -> None:
         source = "# Demo\n\n- Output language: English\n\n`STT:00:00:01-00:00:02`\n"
@@ -375,6 +431,18 @@ class FreshCodexJobTests(unittest.TestCase):
             ],
             [(1, 200), (201, 400), (401, 505)],
         )
+        self.assertEqual(
+            [item["chunk_line_count"] for item in manifest["chunks"]],
+            [200, 200, 105],
+        )
+        self.assertEqual(
+            manifest["chunk_read_contract"],
+            {
+                "scope": "entire_chunk_file",
+                "source_coordinate_fields": ["start_line", "end_line"],
+                "max_commands_per_chunk": 1,
+            },
+        )
         self.assertEqual(reconstructed, source)
         self.assertEqual(
             manifest["source_sha256"],
@@ -434,19 +502,21 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertIn("workspace-write", command)
         self.assertIn("--add-dir", command)
         self.assertIn("--json", command)
+        self.assertIn(WORKER_DOCUMENTS_PLUGIN_CONFIG, command)
         self.assertEqual(DEFAULT_REASONING_EFFORT, "high")
         self.assertIn('model_reasoning_effort="high"', command)
         self.assertEqual(command[-1], "-")
         self.assertNotIn("resume", command)
 
-    def test_prompt_requires_private_tail_snapshot_cleanup_without_count_as_coverage(self) -> None:
+    def test_prompt_forbids_snapshot_mutation_without_using_count_as_coverage(self) -> None:
         prompt = build_fresh_prompt(
             Path("/tmp/repo"),
             Path("/tmp/minutes/jobs/job"),
             policy={},
         )
 
-        self.assertIn("private desktop material", prompt)
+        self.assertIn("Do not delete, move, recreate, or hash raw frames/Snapshots", prompt)
+        self.assertIn("validators own frame accounting", prompt)
         self.assertIn("verify all Markdown Snapshot refs resolve", prompt)
         self.assertIn("Do not treat raw Snapshot count as the evidence-coverage gate", prompt)
 
@@ -544,6 +614,10 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertEqual(fields["tool_count"], 1)
         self.assertEqual(fields["item_counts"], {"agent_message": 1, "file_change": 1})
         self.assertEqual(fields["token_usage"]["input_tokens"], 120)
+        self.assertEqual(
+            fields["context_efficiency"]["oversized_tool_output_count"],
+            1,
+        )
         self.assertIn("fresh Codex: started", console)
         self.assertIn("input=120", console)
         self.assertNotIn("changed line", console)
@@ -586,6 +660,119 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertEqual(efficiency["tool_output_bytes"], 25_000)
         self.assertEqual(efficiency["max_tool_output_bytes"], 25_000)
         self.assertEqual(efficiency["oversized_tool_output_count"], 1)
+        self.assertEqual(len(efficiency["tool_output_budget_violations"]), 1)
+        self.assertEqual(
+            efficiency["tool_output_budget_violations"][0]["output_bytes"],
+            25_000,
+        )
+
+    def test_json_stream_stops_after_first_tool_output_budget_violation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            events_path = root / "events.jsonl"
+            stderr_path = root / "stderr.log"
+            progress = io.StringIO()
+            child_code = "\n".join(
+                (
+                    "import json, sys, time",
+                    "sys.stdin.read()",
+                    "print(json.dumps({'type': 'item.completed', 'item': "
+                    "{'id': 'tool-1', 'type': 'command_execution', "
+                    "'command': 'cat large-file', 'aggregated_output': 'x' * 20001}}), flush=True)",
+                    "time.sleep(0.2)",
+                    "print(json.dumps({'type': 'item.completed', 'item': "
+                    "{'id': 'message-1', 'type': 'agent_message', 'text': 'too late'}}), flush=True)",
+                )
+            )
+
+            returncode, summary = run_codex_json_stream(
+                [sys.executable, "-c", child_code],
+                prompt="bounded prompt",
+                env={},
+                events_path=events_path,
+                stderr_path=stderr_path,
+                progress_stream=progress,
+            )
+
+            event_log = events_path.read_text(encoding="utf-8")
+
+        self.assertEqual(returncode, TOOL_OUTPUT_BUDGET_EXIT_CODE)
+        self.assertEqual(summary.oversized_tool_output_count, 1)
+        self.assertIn("cat large-file", progress.getvalue())
+        self.assertNotIn("too late", event_log)
+
+    def test_json_stream_stops_on_forbidden_worker_skill_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            events_path = root / "events.jsonl"
+            stderr_path = root / "stderr.log"
+            progress = io.StringIO()
+            child_code = "\n".join(
+                (
+                    "import json, sys, time",
+                    "sys.stdin.read()",
+                    "print(json.dumps({'type': 'item.completed', 'item': "
+                    "{'id': 'tool-1', 'type': 'command_execution', "
+                    "'command': 'cat /tmp/SKILL.md', 'aggregated_output': 'small'}}), flush=True)",
+                    "time.sleep(0.2)",
+                    "print(json.dumps({'type': 'item.completed', 'item': "
+                    "{'id': 'message-1', 'type': 'agent_message', 'text': 'too late'}}), flush=True)",
+                )
+            )
+
+            returncode, summary = run_codex_json_stream(
+                [sys.executable, "-c", child_code],
+                prompt="bounded prompt",
+                env={},
+                events_path=events_path,
+                stderr_path=stderr_path,
+                progress_stream=progress,
+            )
+
+            event_log = events_path.read_text(encoding="utf-8")
+
+        self.assertEqual(returncode, TOOL_OUTPUT_BUDGET_EXIT_CODE)
+        self.assertEqual(summary.forbidden_instruction_read_count, 1)
+        self.assertIn("forbidden worker instruction read", progress.getvalue())
+        self.assertNotIn("too late", event_log)
+
+    def test_json_stream_stops_on_duplicate_evidence_chunk_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            events_path = root / "events.jsonl"
+            stderr_path = root / "stderr.log"
+            progress = io.StringIO()
+            child_code = "\n".join(
+                (
+                    "import json, sys, time",
+                    "sys.stdin.read()",
+                    "for item_id in ('tool-1', 'tool-2'):",
+                    "    print(json.dumps({'type': 'item.completed', 'item': "
+                    "{'id': item_id, 'type': 'command_execution', "
+                    "'command': 'sed -n 1,999p evidence_chunks/part-0002.md', "
+                    "'aggregated_output': 'small'}}), flush=True)",
+                    "    time.sleep(0.1)",
+                    "print(json.dumps({'type': 'item.completed', 'item': "
+                    "{'id': 'message-1', 'type': 'agent_message', 'text': 'too late'}}), flush=True)",
+                )
+            )
+
+            returncode, summary = run_codex_json_stream(
+                [sys.executable, "-c", child_code],
+                prompt="bounded prompt",
+                env={},
+                events_path=events_path,
+                stderr_path=stderr_path,
+                progress_stream=progress,
+            )
+
+            event_log = events_path.read_text(encoding="utf-8")
+
+        self.assertEqual(returncode, TOOL_OUTPUT_BUDGET_EXIT_CODE)
+        self.assertEqual(summary.duplicate_evidence_chunk_read_count, 1)
+        self.assertEqual(summary.context_efficiency_fields()["evidence_chunk_read_count"], 1)
+        self.assertIn("duplicate evidence chunk read", progress.getvalue())
+        self.assertNotIn("too late", event_log)
 
     def test_json_stream_archives_full_events_but_emits_bounded_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -599,7 +786,7 @@ class FreshCodexJobTests(unittest.TestCase):
                     "sys.stdin.read()",
                     "print(json.dumps({'type': 'thread.started', 'thread_id': 't-1'}))",
                     "print(json.dumps({'type': 'item.completed', 'item': "
-                    "{'id': 'tool-1', 'type': 'file_change', 'changes': 'DIFF-' + 'x' * 20000}}))",
+                    "{'id': 'tool-1', 'type': 'file_change', 'changes': 'DIFF-' + 'x' * 5000}}))",
                     "print(json.dumps({'type': 'turn.completed', 'usage': "
                     "{'input_tokens': 9, 'cached_input_tokens': 2, "
                     "'output_tokens': 3, 'reasoning_output_tokens': 1}}))",

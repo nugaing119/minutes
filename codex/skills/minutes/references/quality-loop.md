@@ -34,8 +34,11 @@ accounting surface, not the document source. Preserve concrete dates, values, ve
 conditions, exceptions, risks, questions, answers, corrections, decisions, and follow-ups in
 the inventory.
 
-Keep a read-once checklist for chunks and required skill references. Do not reopen already-read
-chunks, generated artifacts, validator source, or unit tests merely to gain confidence. Run the
+The launcher preloads this maintenance contract into the compact content-worker prompt. A fresh
+worker must not reopen this file or another SKILL/reference file. Keep a read-once checklist for
+evidence chunks only. Manifest line ranges refer to the unsplit source; read every part in full
+once, and treat a repeated part path as a contract violation. Do not reopen already-read chunks,
+generated artifacts, validator source, or unit tests merely to gain confidence. Run the
 deterministic gate and inspect only bounded error details or targeted artifact excerpts when it
 fails. Repository-wide regression testing belongs to skill/code changes, not a production media
 job.
@@ -180,3 +183,5 @@ The first correction uses `prepare --reuse-final`. A third render requires an ex
 inspected page, no blocking defects, and only supported warning codes, then run
 `python scripts/finalize_docx.py approve <job-directory>`. The approval command binds the latest
 DOCX and render hashes into `docx_qa.json`; archive only after it passes.
+One additional renderer-repair render is allowed only after the renderer fingerprint changes and
+with a supported blocking defect; the same renderer cannot exceed the normal three attempts.

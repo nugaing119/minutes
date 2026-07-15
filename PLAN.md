@@ -210,10 +210,19 @@ worker가 품질 통과 후 원문 언어 본문을 `content_freeze.json`으로 
 언어가 다를 때만 `low` 추론의 도구 없는 translation worker가 동결 Markdown만 한 번 번역하고,
 별도 delivery worker는 검증된 최종 Markdown으로 Word 생성·전 페이지 QA·아카이브만 수행한다.
 content와 delivery의 기본 추론 수준은 `high`다.
+두 worker의 품질 규칙은 전체 minutes/Documents `SKILL.md`를 도구로 다시 읽는 대신 각각
+8KB 미만 compact prompt에 선주입한다. `finalize_docx.py`는 번들 Documents renderer를 직접
+사용하며 fresh worker에서만 Documents plugin의 자동 skill 주입을 끈다. launcher는 command output과 file-change diff를 같은 model-visible tool output으로
+계측하며, 단일 항목이 20KB를 넘거나 worker가 `SKILL.md`·품질 reference를 열면 phase를 즉시
+종료한다.
+청크 manifest의 줄 범위는 분할 전 원본 좌표로 명시하고 part 전체 읽기만 허용한다. 같은 part가
+두 번째 명령에 나타나면 즉시 종료한다. compact prompt에는 exact sidecar enum/field 계약과 절대
+`.venv/bin/python` 실행 경로를 넣는다. content 50회, delivery 25회 이하를 비용 목표로 계측하되
+품질 게이트나 전 페이지 QA를 생략하는 하드 상한으로 취급하지 않는다.
 `fresh_codex_handoff.json`은 `parent_conversation_inherited=false`,
 `raw_evidence_embedded_in_handoff=false`, 핵심 파일 해시와 Snapshot/raw-frame 디렉터리의
 개수·총 바이트·결합 manifest SHA-256, content/translation/delivery 단계별 실행 시간·토큰·
-도구 호출, 완료 상태와
+도구 호출, 완료 상태와 `worker_contract_passed`, oversized output, forbidden instruction read,
 `context_efficiency`를 기록한다. fresh worker는 재귀적으로
 다른 worker를 실행할 수 없고, Codex가 정상 종료해도 `status.json=completed`와 실제 보관
 파일이 확인되지 않으면 실패로 처리한다.
@@ -257,6 +266,8 @@ Markdown H1을 표지 제목과 최종 폴더명·파일명에 사용한다. DOC
 묶인 `docx_qa.json`으로 남긴다. 기본 렌더는 최초 1회와 차단 결함 수정 1회로 제한하고,
 3회차는 명시적인 차단 결함 코드가 있을 때만 허용한다. Codex 또는 strict 작업은
 `visual_status=passed`가 아니거나 페이지 수가 0이면 보관하지 않는다.
+기본 3회 제한은 유지한다. renderer fingerprint가 실제로 바뀌고 명시적인 차단 결함 코드가
+있는 경우에만 코드 수정 검증용 추가 1회를 허용하며, 같은 renderer로 반복 재렌더링할 수 없다.
 
 macOS Codex sandbox에서 `soffice`를 직접 시험 실행하지 않는다. 반복되는 LibreOffice crash
 dialog를 막기 위해 다음 guard를 처음부터 sandbox 밖의 허용된 실행으로 사용한다.

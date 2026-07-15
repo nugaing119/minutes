@@ -5,6 +5,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -19,6 +21,14 @@ if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from scripts.run_codex import resolve_configured_path
+from scripts.content_quality import (
+    BLUEPRINT_ARCHETYPES,
+    BLUEPRINT_FORM_FACTORS,
+    BLUEPRINT_ROLES,
+    LEDGER_CLASSIFICATIONS,
+    MODEL_FINAL_CHECKS,
+    REQUIRED_FRONT_MATTER_KEYS,
+)
 from scripts.document_language import (
     content_output_language,
     language_policy_from_status,
@@ -36,11 +46,25 @@ from scripts.utils import now_local, read_json, write_json
 
 
 FRESH_CONTEXT_ENV = "MINUTES_FRESH_CONTEXT"
-HANDOFF_SCHEMA_VERSION = 5
+HANDOFF_SCHEMA_VERSION = 6
 MAX_REQUEST_OVERRIDES = 4
 MAX_REQUEST_CHARS = 500
 MAX_CONSOLE_ERROR_CHARS = 500
+DRY_RUN_CONSOLE_BUDGET_BYTES = 8_000
 OVERSIZED_TOOL_OUTPUT_BYTES = 20_000
+TOOL_OUTPUT_BUDGET_EXIT_CODE = 79
+MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS = 4
+FORBIDDEN_WORKER_INSTRUCTION_MARKERS = (
+    "SKILL.md",
+    "quality-loop.md",
+    "docx-validation.md",
+)
+EVIDENCE_CHUNK_COMMAND_PATTERN = re.compile(
+    r"evidence_chunks/(part-\d{4}\.md)\b"
+)
+WORKER_DOCUMENTS_PLUGIN_CONFIG = (
+    'plugins."documents@openai-primary-runtime".enabled=false'
+)
 DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_TRANSLATION_REASONING_EFFORT = "low"
 NON_TOOL_ITEM_TYPES = {"agent_message", "reasoning"}
@@ -56,6 +80,11 @@ WORKER_EVIDENCE_CHUNKS_DIR = "evidence_chunks"
 WORKER_RUNTIME_SUMMARY_NAME = "worker_runtime_summary.json"
 CONTENT_FREEZE_NAME = "content_freeze.json"
 FRESH_PHASES = ("content", "translation", "delivery")
+TOOL_ROUND_TRIP_TARGETS = {
+    "content": 50,
+    "translation": 0,
+    "delivery": 25,
+}
 WORKER_EVIDENCE_LINES_PER_CHUNK = 500
 WORKER_EVIDENCE_MAX_BYTES_PER_CHUNK = 15_000
 WORKER_REVIEW_REASONS = {
@@ -81,8 +110,20 @@ class CodexStreamSummary:
     tool_output_bytes: int = 0
     max_tool_output_bytes: int = 0
     oversized_tool_output_count: int = 0
+    tool_output_budget_violations: list[dict[str, object]] = field(
+        default_factory=list
+    )
+    forbidden_instruction_read_count: int = 0
+    forbidden_instruction_reads: list[dict[str, object]] = field(
+        default_factory=list
+    )
+    evidence_chunk_paths_seen: set[str] = field(default_factory=set)
+    duplicate_evidence_chunk_read_count: int = 0
+    duplicate_evidence_chunk_reads: list[dict[str, object]] = field(
+        default_factory=list
+    )
 
-    def context_efficiency_fields(self) -> dict[str, int | float | None]:
+    def context_efficiency_fields(self) -> dict[str, object]:
         input_tokens = self.usage["input_tokens"]
         cached_input_tokens = min(
             input_tokens,
@@ -105,6 +146,24 @@ class CodexStreamSummary:
             "max_tool_output_bytes": self.max_tool_output_bytes,
             "oversized_tool_output_count": self.oversized_tool_output_count,
             "oversized_tool_output_threshold_bytes": OVERSIZED_TOOL_OUTPUT_BYTES,
+            "tool_output_budget_passed": self.oversized_tool_output_count == 0,
+            "tool_output_budget_violations": list(
+                self.tool_output_budget_violations
+            ),
+            "forbidden_instruction_read_count": self.forbidden_instruction_read_count,
+            "forbidden_instruction_reads": list(self.forbidden_instruction_reads),
+            "evidence_chunk_read_count": len(self.evidence_chunk_paths_seen),
+            "duplicate_evidence_chunk_read_count": (
+                self.duplicate_evidence_chunk_read_count
+            ),
+            "duplicate_evidence_chunk_reads": list(
+                self.duplicate_evidence_chunk_reads
+            ),
+            "worker_contract_passed": (
+                self.oversized_tool_output_count == 0
+                and self.forbidden_instruction_read_count == 0
+                and self.duplicate_evidence_chunk_read_count == 0
+            ),
         }
 
     def manifest_fields(self) -> dict[str, object]:
@@ -435,6 +494,9 @@ def write_worker_evidence_chunks(
                 "path": str(chunk_path),
                 "start_line": pending_start + 1,
                 "end_line": pending_start + len(pending),
+                "source_start_line": pending_start + 1,
+                "source_end_line": pending_start + len(pending),
+                "chunk_line_count": len(pending),
                 "bytes": chunk_path.stat().st_size,
                 "sha256": sha256_file(chunk_path),
             }
@@ -475,6 +537,11 @@ def write_worker_evidence_chunks(
             "oversized_chunk_count": sum(
                 size > max_bytes_per_chunk for size in chunk_bytes
             ),
+            "chunk_read_contract": {
+                "scope": "entire_chunk_file",
+                "source_coordinate_fields": ["start_line", "end_line"],
+                "max_commands_per_chunk": 1,
+            },
             "chunks": chunks,
         },
     )
@@ -518,6 +585,74 @@ def collect_evidence_manifest(job_dir: Path) -> dict[str, object]:
             + int(raw_frames["total_bytes"])
         ),
     }
+
+
+def build_dry_run_summary(
+    manifest: Mapping[str, object],
+) -> dict[str, object]:
+    """Return a bounded operator summary without printing prompt or evidence bodies."""
+    evidence = manifest.get("evidence", {})
+    if not isinstance(evidence, Mapping):
+        evidence = {}
+    evidence_files = evidence.get("files", [])
+    if not isinstance(evidence_files, list):
+        evidence_files = []
+    request_overrides = manifest.get("request_overrides", [])
+    if not isinstance(request_overrides, list):
+        request_overrides = []
+    request_digest = hashlib.sha256(
+        json.dumps(
+            request_overrides,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    summary = {
+        "schema_version": manifest.get("schema_version"),
+        "state": manifest.get("state"),
+        "job_dir": manifest.get("job_dir"),
+        "policy": manifest.get("policy"),
+        "request_override_count": len(request_overrides),
+        "request_overrides_sha256": request_digest,
+        "ephemeral_session": manifest.get("ephemeral_session"),
+        "planned_ephemeral_session_count": manifest.get(
+            "planned_ephemeral_session_count"
+        ),
+        "planned_phases": manifest.get("planned_phases"),
+        "phase_isolation": manifest.get("phase_isolation"),
+        "worker_contract": manifest.get("worker_contract"),
+        "parent_conversation_inherited": manifest.get(
+            "parent_conversation_inherited"
+        ),
+        "raw_evidence_embedded_in_handoff": manifest.get(
+            "raw_evidence_embedded_in_handoff"
+        ),
+        "handoff_prompt_bytes": manifest.get("handoff_prompt_bytes"),
+        "handoff_prompt_sha256": manifest.get("handoff_prompt_sha256"),
+        "evidence_summary": {
+            "file_count": len(evidence_files),
+            "snapshot_count": evidence.get("snapshot_count"),
+            "raw_frame_count": evidence.get("raw_frame_count"),
+            "total_bytes": evidence.get("total_bytes"),
+        },
+        "runtime": manifest.get("runtime"),
+        "translation_runtime": manifest.get("translation_runtime"),
+        "commands": manifest.get("commands"),
+        "omitted_from_console": [
+            "content_prompt_body",
+            "translation_prompt_body",
+            "delivery_prompt_body",
+            "evidence_file_records",
+        ],
+    }
+    encoded = json.dumps(summary, ensure_ascii=False, indent=2).encode("utf-8")
+    if len(encoded) > DRY_RUN_CONSOLE_BUDGET_BYTES:
+        raise RuntimeError(
+            "dry-run console summary exceeded its bounded-output contract: "
+            f"{len(encoded)} > {DRY_RUN_CONSOLE_BUDGET_BYTES} bytes"
+        )
+    return summary
 
 
 def validate_job_dir(job_dir: Path, jobs_dir: Path) -> Path:
@@ -627,6 +762,31 @@ def _event_error_message(event: Mapping[str, object]) -> str:
     return _bounded_console_text(event.get("type", "unknown error"))
 
 
+def _model_visible_tool_output(item: Mapping[str, object]) -> str:
+    for key in ("aggregated_output", "output", "changes", "result"):
+        value = item.get(key)
+        if isinstance(value, str):
+            return value
+        if value is not None:
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+    return ""
+
+
+def _tool_item_preview(item: Mapping[str, object]) -> str:
+    command = item.get("command")
+    if command:
+        return _bounded_console_text(command)
+    path = item.get("path")
+    if path:
+        return _bounded_console_text(path)
+    return _bounded_console_text(item.get("type", "unknown tool item"))
+
+
 def record_codex_event(
     event: Mapping[str, object],
     summary: CodexStreamSummary,
@@ -691,17 +851,70 @@ def record_codex_event(
         return
     item_type = str(item.get("type", "unknown"))
     summary.item_counts[item_type] = summary.item_counts.get(item_type, 0) + 1
+    output = _model_visible_tool_output(item)
+    if output:
+        output_bytes = len(output.encode("utf-8"))
+        summary.tool_output_bytes += output_bytes
+        summary.max_tool_output_bytes = max(
+            summary.max_tool_output_bytes,
+            output_bytes,
+        )
+        if output_bytes > OVERSIZED_TOOL_OUTPUT_BYTES:
+            summary.oversized_tool_output_count += 1
+            if (
+                len(summary.tool_output_budget_violations)
+                < MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS
+            ):
+                preview = _tool_item_preview(item)
+                summary.tool_output_budget_violations.append(
+                    {
+                        "item_id": str(item.get("id", "")),
+                        "item_type": item_type,
+                        "output_bytes": output_bytes,
+                        "command": preview,
+                        "command_sha256": hashlib.sha256(
+                            str(item.get("command", "")).encode("utf-8")
+                        ).hexdigest(),
+                    }
+                )
     if item_type == "command_execution":
-        aggregated_output = item.get("aggregated_output")
-        if isinstance(aggregated_output, str):
-            output_bytes = len(aggregated_output.encode("utf-8"))
-            summary.tool_output_bytes += output_bytes
-            summary.max_tool_output_bytes = max(
-                summary.max_tool_output_bytes,
-                output_bytes,
-            )
-            if output_bytes > OVERSIZED_TOOL_OUTPUT_BYTES:
-                summary.oversized_tool_output_count += 1
+        command = str(item.get("command", ""))
+        if any(marker in command for marker in FORBIDDEN_WORKER_INSTRUCTION_MARKERS):
+            summary.forbidden_instruction_read_count += 1
+            if (
+                len(summary.forbidden_instruction_reads)
+                < MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS
+            ):
+                summary.forbidden_instruction_reads.append(
+                    {
+                        "item_id": str(item.get("id", "")),
+                        "command": _bounded_console_text(command),
+                        "command_sha256": hashlib.sha256(
+                            command.encode("utf-8")
+                        ).hexdigest(),
+                    }
+                )
+        chunk_paths = set(EVIDENCE_CHUNK_COMMAND_PATTERN.findall(command))
+        duplicates = sorted(chunk_paths & summary.evidence_chunk_paths_seen)
+        summary.evidence_chunk_paths_seen.update(chunk_paths)
+        if duplicates:
+            summary.duplicate_evidence_chunk_read_count += len(duplicates)
+            for chunk_path in duplicates:
+                if (
+                    len(summary.duplicate_evidence_chunk_reads)
+                    >= MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS
+                ):
+                    break
+                summary.duplicate_evidence_chunk_reads.append(
+                    {
+                        "item_id": str(item.get("id", "")),
+                        "chunk": chunk_path,
+                        "command": _bounded_console_text(command),
+                        "command_sha256": hashlib.sha256(
+                            command.encode("utf-8")
+                        ).hexdigest(),
+                    }
+                )
     item_id = item.get("id")
     if item_type not in NON_TOOL_ITEM_TYPES and isinstance(item_id, str):
         summary.tool_item_ids.add(item_id)
@@ -785,16 +998,77 @@ def run_codex_json_stream(
         try:
             process.stdin.write(prompt)
             process.stdin.close()
+            budget_exceeded = False
+            returncode: int
             for line in process.stdout:
                 events_handle.write(line)
                 events_handle.flush()
+                previous_violation_count = summary.oversized_tool_output_count
+                previous_instruction_read_count = (
+                    summary.forbidden_instruction_read_count
+                )
+                previous_duplicate_chunk_read_count = (
+                    summary.duplicate_evidence_chunk_read_count
+                )
                 consume_codex_event_line(
                     line,
                     summary,
                     elapsed_seconds=time.perf_counter() - started,
                     progress_stream=progress_stream,
                 )
-            returncode = process.wait()
+                output_budget_exceeded = (
+                    summary.oversized_tool_output_count > previous_violation_count
+                )
+                instruction_read_detected = (
+                    summary.forbidden_instruction_read_count
+                    > previous_instruction_read_count
+                )
+                duplicate_chunk_read_detected = (
+                    summary.duplicate_evidence_chunk_read_count
+                    > previous_duplicate_chunk_read_count
+                )
+                if (
+                    output_budget_exceeded
+                    or instruction_read_detected
+                    or duplicate_chunk_read_detected
+                ):
+                    budget_exceeded = True
+                    if output_budget_exceeded:
+                        violation = summary.tool_output_budget_violations[-1]
+                        detail = (
+                            "tool output budget exceeded"
+                            f" (bytes={violation['output_bytes']}, "
+                            f"command={violation['command']})"
+                        )
+                    elif instruction_read_detected:
+                        violation = summary.forbidden_instruction_reads[-1]
+                        detail = (
+                            "forbidden worker instruction read"
+                            f" (command={violation['command']})"
+                        )
+                    else:
+                        violation = summary.duplicate_evidence_chunk_reads[-1]
+                        detail = (
+                            "duplicate evidence chunk read"
+                            f" (chunk={violation['chunk']}, "
+                            f"command={violation['command']})"
+                        )
+                    print(
+                        f"fresh Codex: {detail}; terminating phase",
+                        file=progress_stream,
+                        flush=True,
+                    )
+                    process.terminate()
+                    break
+            if budget_exceeded:
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                returncode = TOOL_OUTPUT_BUDGET_EXIT_CODE
+            else:
+                returncode = process.wait()
         except BaseException:
             if process.poll() is None:
                 process.kill()
@@ -816,7 +1090,6 @@ def build_fresh_prompt(
     policy: Mapping[str, object],
     request_overrides: Sequence[str] = (),
 ) -> str:
-    skill_path = repo_root / "codex/skills/minutes/SKILL.md"
     input_path = job_dir / "codex_minutes_input.md"
     evidence_summary_path = job_dir / WORKER_EVIDENCE_SUMMARY_NAME
     evidence_chunks_path = job_dir / WORKER_EVIDENCE_CHUNKS_NAME
@@ -834,6 +1107,18 @@ def build_fresh_prompt(
         final_output_language,
         detected_language,
     )
+    python_executable = repo_root / ".venv/bin/python"
+    freeze_script = repo_root / "scripts/content_freeze.py"
+    freeze_command = " ".join(
+        shlex.quote(str(value))
+        for value in (python_executable, freeze_script, job_dir)
+    )
+    ledger_classifications = "|".join(sorted(LEDGER_CLASSIFICATIONS))
+    blueprint_archetypes = "|".join(sorted(BLUEPRINT_ARCHETYPES))
+    blueprint_roles = "|".join(sorted(BLUEPRINT_ROLES))
+    blueprint_forms = "|".join(sorted(BLUEPRINT_FORM_FACTORS))
+    front_matter_keys = "|".join(sorted(REQUIRED_FRONT_MATTER_KEYS))
+    model_final_checks = "|".join(MODEL_FINAL_CHECKS)
     language_contract = (
         "Write validated minutes.md in the detected source language. Do not translate; the "
         "next phase translates it once without evidence."
@@ -841,11 +1126,12 @@ def build_fresh_prompt(
         else "Write validated minutes.md in CONTENT_OUTPUT_LANGUAGE."
     )
     return (
-        "$minutes fresh-context content worker for exactly one prepared media job.\n\n"
-        "This is isolated. Do not use the parent conversation or relaunch "
-        "run_fresh_codex_job.py.\n\n"
+        "Fresh-context content worker for exactly one prepared media job. This prompt is the "
+        "preloaded compact content contract. Do not invoke a skill. Do not open SKILL.md. "
+        "Do not open quality-loop.md or any other instruction/reference file; their required production "
+        "rules are already compiled below.\n\n"
+        "Do not use the parent conversation or relaunch run_fresh_codex_job.py.\n\n"
         f"Repository: {repo_root}\n"
-        f"Authoritative skill: {skill_path}\n"
         f"Job directory: {job_dir}\n"
         f"Source evidence input (integrity only; do not read directly): {input_path}\n"
         f"Evidence chunk manifest: {evidence_chunks_path}\n"
@@ -862,49 +1148,70 @@ def build_fresh_prompt(
         "Overrides:\n"
         f"{override_text}\n\n"
         f"Language contract: {language_contract}\n\n"
-        "This is a production media job, not repository development. Read the authoritative "
-        "skill and each required reference completely once; keep a checklist and Do not reread "
-        "them. Do not inspect validator implementations or tests unless a validator actually "
-        "fails and its bounded error cannot be resolved from the skill. Do not run repository-wide "
-        "py_compile, unittest discover, pytest, lint, or git review commands. This phase's "
-        "acceptance comes from the configured content audit, compact quality review, content "
-        "freeze, and launcher verification.\n\n"
-        "Read worker_runtime_summary.json once; do not print the raw status, process_metrics, "
-        "speaker_attribution_report, or speech_activity JSON because validators consume them. "
-        "Read evidence_chunks.json and every listed chunk exactly once in manifest order. Use "
-        "one bounded read command per chunk and never concatenate multiple chunk files into one "
-        "tool call; they "
-        "contain complete timestamped STT and OCR. Do not read codex_minutes_input.md directly or "
-        "use overlapping source ranges. Read evidence_coverage_summary.json before authoring, "
+        "This is a production media job. Do not reread this contract from repository files. Do not "
+        "inspect validator implementations or tests. Do not run repository-wide py_compile, unittest "
+        "discover, pytest, lint, or git review commands; the freeze is the acceptance gate.\n\n"
+        "Read worker_runtime_summary.json once; do not print raw status, metrics, speaker, or speech JSON. "
+        "Read evidence_chunks.json once and every listed chunk exactly once in manifest order. "
+        "Manifest start_line/end_line and source_start_line/source_end_line are coordinates in the "
+        "unsplit source, not ranges inside each part. For every chunks[].path, read the entire part "
+        "in one command such as `sed -n '1,999p' <path>`; never mention that part path in a second "
+        "command. A duplicate part read terminates the phase. Never concatenate chunk files; each "
+        "part contains complete timestamped STT/OCR and is <=15KB. Do not read "
+        "codex_minutes_input.md directly or use overlapping source ranges. Read "
+        "evidence_coverage_summary.json before authoring, "
         "verify frame accounting and the maximum-gap gate, and inspect only material visual_only, "
-        "speaker_ui_change, and forced_coverage snapshots. Use the skill's resolvable evidence refs. "
+        "speaker_ui_change, and forced_coverage snapshots. Use only resolvable evidence refs in "
+        "the exact STT:HH:MM:SS-HH:MM:SS, OCR:HH:MM:SS, and "
+        "Snapshot:snapshot-NNNN@HH:MM:SS forms. "
         "Do not read or print evidence_coverage.json; deterministic validators read the complete "
         "raw ledger internally. Do not read or print fresh_codex_handoff.json. Do not recursively "
-        "list the job directory or frame directories. Keep command output below 8KB; redirect "
-        "larger diagnostics and print only counts or targeted excerpts. Build one cumulative "
-        "inventory without lossy intermediate summaries.\n\n"
-        "For strict jobs, also read codex/skills/minutes/references/quality-loop.md and apply "
-        "its ledger, reader-facing document blueprint, adversarial review, bounded revision, and "
-        "hash-bound review. Preserve front matter, H2 roles, inventory placement, form factors, "
-        "operational utility, and reader-facing evidence. Structural validity alone is not a "
-        "quality pass.\n\n"
+        "list the job directory or frame directories. Never concatenate files in one command. "
+        "Keep each command output at or below 16KB; a 20KB result terminates this phase. Build one cumulative "
+        f"inventory without lossy intermediate summaries. Target <={TOOL_ROUND_TRIP_TARGETS['content']} "
+        "tool calls without skipping evidence or quality gates.\n\n"
+        "Exact strict sidecar contract; do not inspect validator source/tests or invent enums:\n"
+        f"- evidence_ledger.json: schema_version=1, status=completed, chunk_count; every chunk uses "
+        f"index, source_sha256, classification({ledger_classifications}), rationale, material_topics[], "
+        "inventory_item_ids[]. material/mixed needs topics+IDs; other classes need empty IDs.\n"
+        "- content_inventory.json: schema_version=1, items[], conflicts[]. Each item has id, "
+        "time_range, category, statement, importance(required|optional), qualifier, source_refs[], "
+        "official_verification(required|not_applicable). Conflicts use id,description,source_refs for both sides.\n"
+        f"- reader-facing document blueprint document_blueprint.json: schema_version=1, status=completed, "
+        f"document_archetype({blueprint_archetypes}), document_type, reader_goal, front_matter[], "
+        f"sections[]. Required front-matter keys are {front_matter_keys}; each entry has key,label,value "
+        "and its `- label: value` line must be verbatim in minutes.md. Each section has id, heading, "
+        f"role({blueprint_roles}), form_factor({blueprint_forms}), applicability(required|not_applicable), "
+        "primary_inventory_item_ids[] and rationale when not applicable. H2 order must equal section "
+        "order; assign every required item to exactly one primary section; use exactly one "
+        "executive_synthesis and open_questions, operational_actions when actionable evidence exists, "
+        "and <=6 topic_analysis H2s.\n"
+        "- content_audit.json: schema_version=1, status=passed, covered_item_ids, missing_item_ids=[], "
+        "qualifier_changes=[], silent_conflicts=[], documented_conflict_ids, coverage[{item_id,"
+        "document_refs:[unique verbatim minutes text]}], conflict_coverage with conflict_id, "
+        "recording_fidelity{preserved_item_ids,rewritten_by_external_source_item_ids:[]}, and "
+        "intentional_omissions[]. Every required item must be covered and evidenced.\n"
+        f"- content_quality_review.json: schema_version=3, status=passed, one review_cycles entry "
+        f"{{cycle:1,status:passed,findings:[],changes:[]}}, and final_checks with exactly "
+        f"{model_final_checks}; every check is {{status:passed,finding:nonempty}}. Do not add bindings "
+        "or document_signals; content_freeze fills them. Use a second cycle only after one named "
+        "targeted revision. Structural validity alone is not a quality pass.\n"
+        "- official_sources.json when nothing remains to verify: schema_version=1, "
+        "status=not_applicable, ISO-8601 checked_at, policy=official_only, nonempty reason, claims:[], "
+        "privacy:{raw_transcript_or_ocr_sent:false}.\n\n"
         "Complete only the evidence, inventory, blueprint, Markdown, content audit, and content "
-        "quality stages. Before freezing content, remove only unreferenced archived tail Snapshots "
-        "after the substantive-content boundary when they contain lock screens, unrelated "
-        "application/browser activity, or private desktop material; preserve every referenced "
-        "or substantively useful Snapshot and verify all Markdown Snapshot refs resolve. Do not "
+        "quality stages. Do not delete, move, recreate, or hash raw frames/Snapshots; validators "
+        "own frame accounting. Preserve every referenced or substantively useful Snapshot and "
+        "verify all Markdown Snapshot refs resolve. Do not "
         "treat raw Snapshot count as the evidence-coverage gate. Follow the artifact order "
         "ledger/inventory → blueprint → sources → minutes → audit/quality review → content "
-        "freeze. Write content_quality_review.json with schema_version=3 and only the eight "
-        "model-judged final checks documented by quality-loop.md; do not calculate hashes, chunk "
-        "sets, or document signals yourself. Run `python scripts/content_freeze.py <job-directory>` "
-        "once; that command fills deterministic bindings, reruns all content gates, and writes "
+        "freeze. After evidence/snapshot review, create all large artifacts in one multi-file "
+        "apply_patch call and do not read them back or run custom jq/Python prechecks. Run exactly "
+        f"`{freeze_command}`; it fills deterministic bindings, reruns all content gates, and writes "
         "content_freeze.json. Do not create, edit, render, or inspect a DOCX. Do not run "
         "archive_job.py and do not change status.json to completed. Stop after the freeze verifies. "
-        "Write each large artifact "
-        "once, then make only corrections required by a failed validation. Do not print or "
-        "repeatedly inspect full artifacts or full diffs; "
-        "use hashes, counts, targeted searches, bounded excerpts, and diff summaries. Keep the "
+        "If freeze fails, correct all named issues in one patch and retry once; do not open validator "
+        "code. Write each large artifact once; never print or reread full artifacts/diffs. Keep the "
         "final response concise and report only the content freeze hash and validation result.\n"
     )
 
@@ -915,7 +1222,6 @@ def build_delivery_prompt(
     *,
     policy: Mapping[str, object],
 ) -> str:
-    skill_path = repo_root / "codex/skills/minutes/SKILL.md"
     freeze_path = job_dir / CONTENT_FREEZE_NAME
     final_output_language = str(policy.get("output_language", "auto"))
     detected_language = str(policy.get("detected_language", "unknown"))
@@ -930,19 +1236,42 @@ def build_delivery_prompt(
     )
     translation_manifest_path = job_dir / TRANSLATION_MANIFEST_NAME
     blueprint_path = job_dir / "document_blueprint.json"
+    python_executable = repo_root / ".venv/bin/python"
+
+    def worker_command(script_name: str, *arguments: object) -> str:
+        values = (
+            python_executable,
+            repo_root / "scripts" / script_name,
+            *arguments,
+        )
+        return " ".join(shlex.quote(str(value)) for value in values)
+
+    freeze_verify_command = worker_command("content_freeze.py", job_dir, "--verify")
+    translation_verify_command = worker_command(
+        "translation.py", job_dir, "--verify"
+    )
+    prepare_command = worker_command("finalize_docx.py", "prepare", job_dir)
+    reuse_command = worker_command(
+        "finalize_docx.py", "prepare", job_dir, "--reuse-final"
+    )
+    approve_command = worker_command("finalize_docx.py", "approve", job_dir)
+    archive_command = worker_command("archive_job.py", job_dir)
     translation_contract = (
-        f"Run `python scripts/translation.py {job_dir} --verify` once, then read only the "
-        f"validated final Markdown at {minutes_path}. Do not translate, polish, summarize, or "
+        f"Run `{translation_verify_command}` once, then use only "
+        f"the validated final Markdown path at {minutes_path} without printing the file. Do not "
+        "translate, polish, summarize, or "
         "compare it with raw evidence in this phase."
         if needs_translation
         else "No translation is required; use the frozen source Markdown as the final Markdown."
     )
     return (
-        "$minutes and $documents fresh-context delivery worker for one content-frozen job.\n\n"
+        "Fresh-context visual delivery worker for one content-frozen job. This prompt is the "
+        "preloaded compact delivery contract. Do not invoke a skill. Do not open any SKILL.md or "
+        "instruction/reference file. `finalize_docx.py` already applies the repository's Word "
+        "preset and bundled Documents renderer deterministically.\n\n"
         "This is a new ephemeral execution with no parent or content-worker conversation. "
         "Do not launch run_fresh_codex_job.py again.\n\n"
         f"Repository: {repo_root}\n"
-        f"Authoritative minutes skill: {skill_path}\n"
         f"Job directory: {job_dir}\n"
         f"Content freeze: {freeze_path}\n"
         f"Final Markdown: {minutes_path}\n"
@@ -953,31 +1282,33 @@ def build_delivery_prompt(
         "This phase performs Word finalization, all-page visual QA, archive, and final verification "
         "only. Never read codex_minutes_input.md, evidence_chunks.json, transcript, OCR, evidence "
         "ledger, content inventory, content audit, or raw evidence. Deterministic validators consume "
-        "those files without returning them to you. Read the minutes skill, its DOCX validation "
-        "reference, the Documents skill, content_freeze.json, the final Markdown, and document_blueprint.json "
-        "once. Run `python scripts/content_freeze.py <job-directory> --verify` before Word work.\n\n"
+        "those files without returning them to you. Do not print the full final Markdown or DOCX "
+        "XML. Read only bounded content_freeze.json fields and document_blueprint.json once. Run "
+        f"`{freeze_verify_command}` before Word work. "
+        "Never concatenate files in one command. Keep each command output at or below 16KB; a "
+        f"20KB result terminates this phase. Target <={TOOL_ROUND_TRIP_TARGETS['delivery']} tool "
+        "calls without skipping all-page QA.\n\n"
         f"{translation_contract}\n\n"
         "The frozen Markdown is immutable, and the validated final Markdown is immutable. Do not "
         "rewrite, shorten, translate, polish, or reorganize either file for pagination. "
         "If you find a genuine semantic blocker, write semantic_blocker.json with the exact section "
         "and reason, then fail without archiving. Otherwise use only layout-preserving DOCX edits.\n\n"
-        "Run `python scripts/finalize_docx.py prepare <job-directory>` once. It generates the draft "
+        f"Run `{prepare_command}` once. It generates the draft "
         "and final DOCX, cleans the render directory, renders every page, and runs structural QA in "
         "one bounded command. Inspect every latest page PNG at 100% zoom. Blocking defects are: "
         "clipped or overlapping text, missing glyph/content, blank interior page, broken TOC or "
-        "bookmark, unreadable table, and orphan heading or split row. A short final page, whitespace "
+        "bookmark, unreadable table, incorrect list numbering, and orphan heading or split row. A short final page, whitespace "
         "on a single TOC page, intentional section whitespace, and mild readable wrapping are "
         "nonblocking warnings. Do not revise for warnings alone.\n\n"
         "If a blocking defect exists, edit only minutes.final.docx and run "
-        "`python scripts/finalize_docx.py prepare <job-directory> --reuse-final` once. A third render "
+        f"`{reuse_command}` once. A third render "
         "is forbidden unless a blocking defect remains; then pass its exact supported code through "
         "--blocking-defect-code. Write visual_review.json with schema_version=1, status=passed, the "
         "complete ordered inspected_pages list, empty blocking_defects, and warnings using only the "
-        "documented nonblocking codes. Run `python scripts/finalize_docx.py approve <job-directory>`; "
-        "the command adds hashes and creates passed docx_qa.json. Then run archive_job.py and verify "
-        "status.json is completed and final artifacts pass. Never dump DOCX XML or a full "
-        "Markdown/JSON file. Keep command output below 8KB and use defect codes, hashes, counts, "
-        "and targeted excerpts.\n"
+        f"documented nonblocking codes. Run `{approve_command}`; "
+        f"the command adds hashes and creates passed docx_qa.json. Then run `{archive_command}` and verify "
+        "status.json is completed and final artifacts pass. Use defect codes, hashes, counts, "
+        "and targeted excerpts only.\n"
     )
 
 
@@ -1031,6 +1362,7 @@ def build_fresh_codex_command(
     ]
     if model:
         command.extend(["--model", model])
+    command.extend(["--config", WORKER_DOCUMENTS_PLUGIN_CONFIG])
     if reasoning_effort:
         command.extend(
             ["--config", f'model_reasoning_effort="{reasoning_effort}"']
@@ -1063,6 +1395,12 @@ def aggregate_phase_records(
     tool_output_bytes = 0
     max_tool_output_bytes = 0
     oversized_tool_output_count = 0
+    tool_output_budget_violations: list[dict[str, object]] = []
+    forbidden_instruction_read_count = 0
+    forbidden_instruction_reads: list[dict[str, object]] = []
+    evidence_chunk_read_count = 0
+    duplicate_evidence_chunk_read_count = 0
+    duplicate_evidence_chunk_reads: list[dict[str, object]] = []
     elapsed_seconds = 0.0
     for phase in FRESH_PHASES:
         record = phase_records.get(phase, {})
@@ -1096,6 +1434,39 @@ def aggregate_phase_records(
             value = efficiency.get("oversized_tool_output_count", 0)
             if isinstance(value, int):
                 oversized_tool_output_count += value
+            violations = efficiency.get("tool_output_budget_violations", [])
+            if isinstance(violations, list):
+                for violation in violations:
+                    if not isinstance(violation, Mapping):
+                        continue
+                    tool_output_budget_violations.append(
+                        {"phase": phase, **dict(violation)}
+                    )
+            value = efficiency.get("forbidden_instruction_read_count", 0)
+            if isinstance(value, int):
+                forbidden_instruction_read_count += value
+            reads = efficiency.get("forbidden_instruction_reads", [])
+            if isinstance(reads, list):
+                for read in reads:
+                    if not isinstance(read, Mapping):
+                        continue
+                    forbidden_instruction_reads.append(
+                        {"phase": phase, **dict(read)}
+                    )
+            value = efficiency.get("evidence_chunk_read_count", 0)
+            if isinstance(value, int):
+                evidence_chunk_read_count += value
+            value = efficiency.get("duplicate_evidence_chunk_read_count", 0)
+            if isinstance(value, int):
+                duplicate_evidence_chunk_read_count += value
+            reads = efficiency.get("duplicate_evidence_chunk_reads", [])
+            if isinstance(reads, list):
+                for read in reads:
+                    if not isinstance(read, Mapping):
+                        continue
+                    duplicate_evidence_chunk_reads.append(
+                        {"phase": phase, **dict(read)}
+                    )
     cached = min(usage["input_tokens"], usage["cached_input_tokens"])
     return {
         "active_codex_elapsed_seconds": round(elapsed_seconds, 3),
@@ -1118,6 +1489,26 @@ def aggregate_phase_records(
             "max_tool_output_bytes": max_tool_output_bytes,
             "oversized_tool_output_count": oversized_tool_output_count,
             "oversized_tool_output_threshold_bytes": OVERSIZED_TOOL_OUTPUT_BYTES,
+            "tool_output_budget_passed": oversized_tool_output_count == 0,
+            "tool_output_budget_violations": tool_output_budget_violations[
+                :MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS
+            ],
+            "forbidden_instruction_read_count": forbidden_instruction_read_count,
+            "forbidden_instruction_reads": forbidden_instruction_reads[
+                :MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS
+            ],
+            "evidence_chunk_read_count": evidence_chunk_read_count,
+            "duplicate_evidence_chunk_read_count": (
+                duplicate_evidence_chunk_read_count
+            ),
+            "duplicate_evidence_chunk_reads": duplicate_evidence_chunk_reads[
+                :MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS
+            ],
+            "worker_contract_passed": (
+                oversized_tool_output_count == 0
+                and forbidden_instruction_read_count == 0
+                and duplicate_evidence_chunk_read_count == 0
+            ),
         },
     }
 
@@ -1154,6 +1545,15 @@ def run_fresh_phase(
         "last_message_path": str(paths["last_message"]),
         **summary.manifest_fields(),
     }
+    target = TOOL_ROUND_TRIP_TARGETS[phase]
+    record["tool_round_trip_target"] = target
+    efficiency = record.get("context_efficiency")
+    if isinstance(efficiency, dict):
+        efficiency["tool_round_trip_count"] = len(summary.tool_item_ids)
+        efficiency["tool_round_trip_target"] = target
+        efficiency["tool_round_trip_target_met"] = (
+            len(summary.tool_item_ids) <= target
+        )
     print(
         f"fresh Codex {phase}: completed in {elapsed_seconds:.3f}s",
         file=progress_stream,
@@ -1232,7 +1632,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Validate and print the small handoff without launching Codex",
+        help=(
+            "Validate and print a bounded handoff summary without prompt or evidence "
+            "bodies, then exit"
+        ),
     )
     parser.add_argument(
         "--model",
@@ -1319,6 +1722,19 @@ def main(argv: Sequence[str] | None = None) -> None:
             "delivery_requires_content_freeze": True,
             "delivery_requires_translation_manifest": needs_translation,
         },
+        "worker_contract": {
+            "mode": "preloaded_compact",
+            "worker_skill_file_reads_required": False,
+            "documents_renderer": "bundled_documents_skill_render_docx.py",
+            "documents_skill_plugin_enabled_in_worker": False,
+            "tool_output_target_bytes": 16_000,
+            "tool_output_hard_limit_bytes": OVERSIZED_TOOL_OUTPUT_BYTES,
+            "hard_limit_action": "terminate_phase",
+            "tool_round_trip_targets": {
+                phase: TOOL_ROUND_TRIP_TARGETS[phase]
+                for phase in planned_phases
+            },
+        },
         "parent_conversation_inherited": False,
         "raw_evidence_embedded_in_handoff": False,
         "handoff_prompt_bytes": {
@@ -1354,14 +1770,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     }
 
     if args.dry_run:
-        print(json.dumps(manifest, ensure_ascii=False, indent=2))
-        print("\n--- content prompt ---\n")
-        print(content_prompt, end="")
-        if needs_translation:
-            print("\n--- translation prompt ---\n")
-            print("<built once from content-frozen minutes.md; source evidence is never included>\n")
-        print("\n--- delivery prompt ---\n")
-        print(delivery_prompt, end="")
+        print(
+            json.dumps(
+                build_dry_run_summary(manifest),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return
 
     write_json(manifest_path, manifest)
@@ -1413,6 +1828,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             manifest["phases"] = dict(phase_records)
             write_json(manifest_path, manifest)
             if returncode != 0:
+                if returncode == TOOL_OUTPUT_BUDGET_EXIT_CODE:
+                    raise RuntimeError(
+                        "fresh Codex content phase violated the worker output/contract guard"
+                    )
                 raise RuntimeError(
                     f"fresh Codex content phase exited with status {returncode}"
                 )
@@ -1485,6 +1904,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                 manifest["phases"] = dict(phase_records)
                 write_json(manifest_path, manifest)
                 if returncode != 0:
+                    if returncode == TOOL_OUTPUT_BUDGET_EXIT_CODE:
+                        raise RuntimeError(
+                            "fresh Codex translation phase violated the worker "
+                            "output/contract guard"
+                        )
                     raise RuntimeError(
                         "fresh Codex translation phase exited with status "
                         f"{returncode}"
@@ -1535,6 +1959,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         manifest["phases"] = dict(phase_records)
         write_json(manifest_path, manifest)
         if returncode != 0:
+            if returncode == TOOL_OUTPUT_BUDGET_EXIT_CODE:
+                raise RuntimeError(
+                    "fresh Codex delivery phase violated the worker output/contract guard"
+                )
             raise RuntimeError(
                 f"fresh Codex delivery phase exited with status {returncode}"
             )

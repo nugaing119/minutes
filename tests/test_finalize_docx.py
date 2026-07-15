@@ -132,6 +132,45 @@ class FinalizeDocxTests(unittest.TestCase):
         self.assertEqual(third["attempt"], 3)
         self.assertEqual(len(third["history"]), 3)
 
+    def test_one_renderer_change_repair_is_allowed_after_attempt_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job = self._job(Path(temp_dir))
+            freeze = {"status": "frozen", "content_sha256": "b" * 64}
+            with (
+                patch(
+                    "scripts.finalize_docx.validate_content_freeze",
+                    return_value=freeze,
+                ),
+                patch(
+                    "scripts.finalize_docx._renderer_fingerprint",
+                    side_effect=["a" * 64, "a" * 64, "a" * 64, "b" * 64, "b" * 64],
+                ),
+            ):
+                prepare_docx(job, runner=self._renderer)
+                prepare_docx(job, reuse_final=True, runner=self._renderer)
+                prepare_docx(
+                    job,
+                    reuse_final=True,
+                    blocking_defect_code="UNREADABLE_TABLE",
+                    runner=self._renderer,
+                )
+                repair = prepare_docx(
+                    job,
+                    reuse_final=True,
+                    blocking_defect_code="INCORRECT_LIST_NUMBERING",
+                    runner=self._renderer,
+                )
+                with self.assertRaisesRegex(ValueError, "renderer changes"):
+                    prepare_docx(
+                        job,
+                        reuse_final=True,
+                        blocking_defect_code="INCORRECT_LIST_NUMBERING",
+                        runner=self._renderer,
+                    )
+
+        self.assertEqual(repair["attempt"], 4)
+        self.assertTrue(repair["history"][-1]["renderer_repair"])
+
 
 if __name__ == "__main__":
     unittest.main()

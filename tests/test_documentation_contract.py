@@ -36,6 +36,8 @@ class DocumentationContractTests(unittest.TestCase):
             "run_fresh_codex_job.py",
             "codex exec --ephemeral",
             "translation_manifest.json",
+            "worker_contract_passed",
+            "20KB",
         )
 
         for relative_path, content in self.primary_docs.items():
@@ -138,6 +140,9 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn('"--ephemeral"', launcher)
         self.assertIn('"parent_conversation_inherited": False', launcher)
         self.assertIn('"raw_evidence_embedded_in_handoff": False', launcher)
+        self.assertIn('"mode": "preloaded_compact"', launcher)
+        self.assertIn("TOOL_OUTPUT_BUDGET_EXIT_CODE", launcher)
+        self.assertIn("FORBIDDEN_WORKER_INSTRUCTION_MARKERS", launcher)
         self.assertIn("must not launch", skill)
         self.assertIn("content_freeze.json", skill)
         self.assertIn("translation_manifest.json", skill)
@@ -145,7 +150,11 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("Raw evidence is available only", skill)
         self.assertIn("delivery worker must", skill)
         self.assertIn("evidence_chunks.json", skill)
+        self.assertIn("must not invoke a skill or open `SKILL.md`", skill)
+        self.assertIn("worker_contract_passed=true", skill)
         self.assertIn("Codex LLM provider에 노출될 수 있다", security)
+        self.assertIn("file-change diff", security)
+        self.assertIn("20KB", security)
 
     def test_strict_fresh_jobs_require_ultra_derived_quality_artifacts(self) -> None:
         skill = self.primary_docs["codex/skills/minutes/SKILL.md"]
@@ -197,6 +206,8 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("worker_runtime_summary.json", skill)
         self.assertIn("reasoning effort `high`", skill)
         self.assertIn("context_efficiency", skill)
+        self.assertIn("preloaded phase", skill)
+        self.assertIn("zero forbidden instruction reads", skill)
 
     def test_community1_is_governance_gated_and_offline_only(self) -> None:
         security = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")

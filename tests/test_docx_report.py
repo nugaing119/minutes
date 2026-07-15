@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -13,11 +14,139 @@ from scripts.docx_report import (
     DOCUMENTS_PRESET,
     column_widths,
     generate_docx_report,
+    image_descriptor_for_docx,
     wrap_cover_title,
 )
 
 
 class DocxReportTests(unittest.TestCase):
+    def test_ffmpeg_jpeg_without_jfif_marker_is_normalized_in_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "frame.jpg"
+            original = b"\xff\xd8\xff\xfe\x00\x08Lavc\x00\xff\xd9"
+            image_path.write_bytes(original)
+
+            descriptor = image_descriptor_for_docx(image_path)
+
+        self.assertNotEqual(descriptor, image_path)
+        normalized = descriptor.getvalue()
+        self.assertEqual(normalized[:2], b"\xff\xd8")
+        self.assertEqual(normalized[6:10], b"JFIF")
+        self.assertTrue(normalized.endswith(original[2:]))
+
+    def test_front_matter_images_html_breaks_and_table_rows_render_semantically(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshots = root / "snapshots"
+            snapshots.mkdir()
+            image_path = snapshots / "snapshot_0001_00-00-10.png"
+            image_path.write_bytes(
+                base64.b64decode(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZGU0AAAAASUVORK5CYII="
+                )
+            )
+            markdown = root / "analysis.md"
+            output = root / "analysis.docx"
+            markdown.write_text(
+                "---\n"
+                'title: "Customer journey"\n'
+                'document_type: "Internal field guide"\n'
+                'output_language: "English"\n'
+                "---\n\n"
+                "# Customer journey\n\n"
+                "## Journey\n\n"
+                "![Five-stage journey](snapshots/snapshot_0001_00-00-10.png)\n\n"
+                "*Five stages. Evidence:.*\n\n"
+                "| Stage | Evidence |\n"
+                "|---|---|\n"
+                "| Introduce | `STT:00:00:01-00:00:02`<br>`OCR:00:00:10` |\n",
+                encoding="utf-8",
+            )
+
+            generate_docx_report(markdown, output, saved_date="2026-07-15")
+            document = Document(output)
+
+        paragraph_text = [paragraph.text for paragraph in document.paragraphs]
+        all_text = "\n".join(
+            paragraph_text
+            + [cell.text for table in document.tables for row in table.rows for cell in row.cells]
+        )
+        self.assertFalse(any(text in {"---", 'title: "Customer journey"'} for text in paragraph_text))
+        self.assertNotIn("<br>", all_text)
+        self.assertNotIn("Evidence:.", all_text)
+        self.assertIn("STT:00:00:01-00:00:02\nOCR:00:00:10", all_text)
+        self.assertEqual(len(document.inline_shapes), 1)
+        self.assertEqual(
+            document.inline_shapes[0]._inline.docPr.get("descr"),
+            "Five-stage journey",
+        )
+        for row in document.tables[0].rows:
+            self.assertIsNotNone(row._tr.get_or_add_trPr().find(qn("w:cantSplit")))
+
+    def test_mixed_manual_subheadings_and_separate_lists_do_not_double_or_continue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            markdown = root / "analysis.md"
+            output = root / "analysis.docx"
+            markdown.write_text(
+                "# Guide\n\n"
+                "Document type: Field guide\n\n"
+                "## Workflow\n\n"
+                "### 1. Prepare\n\n"
+                "1. First preparation step.\n"
+                "2. Second preparation step.\n\n"
+                "### 2. Deliver\n\n"
+                "1. First delivery step.\n"
+                "2. Second delivery step.\n",
+                encoding="utf-8",
+            )
+
+            generate_docx_report(markdown, output, saved_date="2026-07-15")
+            document = Document(output)
+
+            namespace = {
+                "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            }
+            with ZipFile(output) as archive:
+                root_xml = ET.fromstring(archive.read("word/document.xml"))
+            toc_texts = [
+                "".join(link.itertext())
+                for link in root_xml.findall(".//w:hyperlink", namespace)
+            ]
+
+        self.assertEqual(toc_texts, ["1. Workflow", "1.1 Prepare", "1.2 Deliver"])
+        heading_text = [
+            paragraph.text
+            for paragraph in document.paragraphs
+            if paragraph.style.name in {"Heading 1", "Heading 2"}
+            and paragraph.text != "Contents"
+        ]
+        self.assertEqual(heading_text, ["Workflow", "Prepare", "Deliver"])
+        numbered = [
+            paragraph
+            for paragraph in document.paragraphs
+            if paragraph.style.name == "List Number"
+        ]
+        self.assertEqual(len(numbered), 4)
+        num_ids = [
+            paragraph._p.pPr.numPr.numId.get(qn("w:val"))
+            for paragraph in numbered
+        ]
+        self.assertEqual(num_ids[0], num_ids[1])
+        self.assertEqual(num_ids[2], num_ids[3])
+        self.assertNotEqual(num_ids[0], num_ids[2])
+        numbering = document.part.numbering_part.element
+        for num_id in {num_ids[0], num_ids[2]}:
+            number = next(
+                element
+                for element in numbering.findall(qn("w:num"))
+                if element.get(qn("w:numId")) == num_id
+            )
+            self.assertEqual(
+                number.find(qn("w:lvlOverride")).find(qn("w:startOverride")).get(qn("w:val")),
+                "1",
+            )
+
     def test_five_column_table_reserves_readable_first_column(self) -> None:
         widths = column_widths(5)
 

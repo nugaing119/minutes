@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -36,6 +37,18 @@ INLINE_MARKDOWN_PATTERN = re.compile(
     r"|\*\*(?P<strong>.+?)\*\*"
     r"|(?<!\*)\*(?P<emphasis>[^*]+?)\*(?!\*)"
 )
+MARKDOWN_IMAGE_PATTERN = re.compile(r"^!\[(?P<alt>[^\]]*)\]\((?P<path>[^)]+)\)$")
+HTML_BREAK_PATTERN = re.compile(r"<br\s*/?>", re.I)
+DANGLING_EVIDENCE_PATTERN = re.compile(
+    r"\s+Evidence:\s*(?:and\s*)?\.(?=(?:\*)?$)",
+    re.I,
+)
+MANUAL_HEADING_PREFIX_PATTERN = re.compile(
+    r"^(?:\d+[.)]|\d+(?:\.\d+)+)\s+"
+)
+JFIF_APP0_SEGMENT = (
+    b"\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+)
 INTERNAL_CITATION_PATTERN = re.compile(
     r":codex-file-citation\{|cite|\bturn\d+(?:search|fetch|view)\d+\b",
     re.I,
@@ -59,6 +72,7 @@ class MarkdownBlock:
     level: int = 0
     items: list[str] | None = None
     table: MarkdownTable | None = None
+    path: str = ""
 
 
 def generate_docx_report(
@@ -70,18 +84,24 @@ def generate_docx_report(
     meeting_title: str | None = None,
 ) -> Path:
     markdown = markdown_path.read_text(encoding="utf-8")
-    validate_supported_markdown(markdown)
-    blocks = parse_markdown(markdown)
+    front_matter, document_markdown = split_front_matter(markdown)
+    validate_supported_markdown(document_markdown)
+    blocks = parse_markdown(document_markdown)
     title_index = first_document_title_index(blocks)
     markdown_title = blocks[title_index].text if title_index is not None else ""
     resolved_title = (
         (document_title or "").strip()
         or (meeting_title or "").strip()
+        or front_matter.get("title", "").strip()
         or markdown_title.strip()
         or output_path.stem
     )
-    resolved_type = (document_type or "").strip() or extract_document_type(markdown)
-    document_language = detect_document_language(markdown)
+    resolved_type = (
+        (document_type or "").strip()
+        or front_matter.get("document_type", "").strip()
+        or extract_document_type(document_markdown)
+    )
+    document_language = detect_document_language(document_markdown)
     heading_anchors = build_heading_anchors(blocks, title_index=title_index)
     heading_numbers, numbering_base_level = build_heading_numbers(
         blocks,
@@ -124,11 +144,44 @@ def generate_docx_report(
         numbering_base_level=numbering_base_level,
         numbered_heading_indexes=set(heading_numbers) if use_automatic_heading_numbers else set(),
         title_index=title_index,
+        source_dir=markdown_path.parent,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
     return output_path
+
+
+def split_front_matter(markdown: str) -> tuple[dict[str, str], str]:
+    lines = markdown.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, markdown
+    closing_index = next(
+        (index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"),
+        None,
+    )
+    if closing_index is None:
+        raise ValueError("unterminated Markdown YAML front matter")
+    metadata: dict[str, str] = {}
+    for line in lines[1:closing_index]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        key, separator, value = stripped.partition(":")
+        if not separator or not key.strip():
+            raise ValueError(f"unsupported Markdown front matter line: {line}")
+        clean_value = value.strip()
+        if (
+            len(clean_value) >= 2
+            and clean_value[0] == clean_value[-1]
+            and clean_value[0] in {'"', "'"}
+        ):
+            clean_value = clean_value[1:-1]
+        metadata[key.strip()] = clean_value
+    body = "\n".join(lines[closing_index + 1 :])
+    if markdown.endswith("\n"):
+        body += "\n"
+    return metadata, body
 
 
 def parse_markdown(markdown: str) -> list[MarkdownBlock]:
@@ -148,6 +201,18 @@ def parse_markdown(markdown: str) -> list[MarkdownBlock]:
                     kind="heading",
                     level=len(heading.group(1)),
                     text=heading.group(2).strip(),
+                )
+            )
+            index += 1
+            continue
+
+        image = MARKDOWN_IMAGE_PATTERN.fullmatch(line.strip())
+        if image:
+            blocks.append(
+                MarkdownBlock(
+                    kind="image",
+                    text=image.group("alt").strip(),
+                    path=image.group("path").strip(),
                 )
             )
             index += 1
@@ -199,6 +264,7 @@ def parse_markdown(markdown: str) -> list[MarkdownBlock]:
                 re.match(r"^\s*[-*]\s+", next_line)
                 or re.match(r"^\s*\d+[.)]\s+", next_line)
                 or next_line.lstrip().startswith(">")
+                or MARKDOWN_IMAGE_PATTERN.fullmatch(next_line.strip())
                 or is_table_start(lines, index)
             ):
                 break
@@ -339,7 +405,11 @@ def has_manual_heading_numbers(
 
 def numbered_heading_text(number: str, text: str) -> str:
     suffix = "." if "." not in number else ""
-    return f"{number}{suffix} {text}"
+    return f"{number}{suffix} {strip_manual_heading_prefix(text)}"
+
+
+def strip_manual_heading_prefix(text: str) -> str:
+    return MANUAL_HEADING_PREFIX_PATTERN.sub("", text, count=1)
 
 
 def add_heading_numbering_definition(doc: Document) -> int:
@@ -430,6 +500,38 @@ def apply_heading_number(
     number_id = OxmlElement("w:numId")
     number_id.set(qn("w:val"), str(num_id))
     number_properties.append(number_id)
+
+
+def restart_numbering_id(doc: Document, style_name: str) -> int:
+    numbering = doc.part.numbering_part.element
+    style_num_id = int(
+        doc.styles[style_name]
+        ._element.pPr.numPr.numId.get(qn("w:val"))
+    )
+    base_number = next(
+        element
+        for element in numbering.findall(qn("w:num"))
+        if int(element.get(qn("w:numId"))) == style_num_id
+    )
+    abstract_num_id = base_number.find(qn("w:abstractNumId")).get(qn("w:val"))
+    num_ids = [
+        int(element.get(qn("w:numId")))
+        for element in numbering.findall(qn("w:num"))
+    ]
+    num_id = max(num_ids, default=0) + 1
+    number = OxmlElement("w:num")
+    number.set(qn("w:numId"), str(num_id))
+    abstract_reference = OxmlElement("w:abstractNumId")
+    abstract_reference.set(qn("w:val"), str(abstract_num_id))
+    number.append(abstract_reference)
+    level_override = OxmlElement("w:lvlOverride")
+    level_override.set(qn("w:ilvl"), "0")
+    start_override = OxmlElement("w:startOverride")
+    start_override.set(qn("w:val"), "1")
+    level_override.append(start_override)
+    number.append(level_override)
+    numbering.append(number)
+    return num_id
 
 
 def configure_document(doc: Document) -> None:
@@ -648,6 +750,7 @@ def add_body(
     numbering_base_level: int | None = None,
     numbered_heading_indexes: set[int] | None = None,
     title_index: int | None = None,
+    source_dir: Path,
 ) -> None:
     numbered_heading_indexes = numbered_heading_indexes or set()
     for index, block in enumerate(blocks):
@@ -655,7 +758,12 @@ def add_body(
             if index == title_index:
                 continue
             style = "Heading 1" if block.level <= 2 else "Heading 2" if block.level == 3 else "Heading 3"
-            paragraph = doc.add_paragraph(block.text, style=style)
+            heading_text = (
+                strip_manual_heading_prefix(block.text)
+                if index in numbered_heading_indexes
+                else block.text
+            )
+            paragraph = doc.add_paragraph(heading_text, style=style)
             if (
                 heading_num_id is not None
                 and numbering_base_level is not None
@@ -677,12 +785,49 @@ def add_body(
             for item in block.items or []:
                 add_bullet(doc, item)
         elif block.kind == "numbered":
+            list_num_id = restart_numbering_id(doc, "List Number")
             for item in block.items or []:
-                add_numbered_item(doc, item)
+                add_numbered_item(doc, item, num_id=list_num_id)
         elif block.kind == "blockquote":
             add_blockquote(doc, block.text)
+        elif block.kind == "image":
+            add_image(doc, block, source_dir=source_dir)
         elif block.kind == "table" and block.table is not None:
             add_table(doc, block.table)
+
+
+def add_image(doc: Document, block: MarkdownBlock, *, source_dir: Path) -> None:
+    raw_path = Path(block.path)
+    image_path = raw_path if raw_path.is_absolute() else source_dir / raw_path
+    resolved_source = source_dir.resolve()
+    resolved_image = image_path.resolve()
+    try:
+        resolved_image.relative_to(resolved_source)
+    except ValueError as exc:
+        raise ValueError(f"Markdown image must stay inside {resolved_source}: {block.path}") from exc
+    if not resolved_image.is_file():
+        raise FileNotFoundError(f"Markdown image does not exist: {resolved_image}")
+
+    paragraph = doc.add_paragraph()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.paragraph_format.space_before = Pt(4)
+    paragraph.paragraph_format.space_after = Pt(4)
+    paragraph.paragraph_format.keep_with_next = True
+    inline_shape = paragraph.add_run().add_picture(
+        image_descriptor_for_docx(resolved_image),
+        width=Inches(6.1),
+    )
+    alt_text = block.text or resolved_image.name
+    inline_shape._inline.docPr.set("descr", alt_text)
+    inline_shape._inline.docPr.set("title", alt_text)
+
+
+def image_descriptor_for_docx(image_path: Path) -> str | io.BytesIO:
+    """Add a JFIF marker in memory for valid FFmpeg JPEGs python-docx rejects."""
+    data = image_path.read_bytes()
+    if data.startswith(b"\xff\xd8") and data[6:10] not in {b"JFIF", b"Exif"}:
+        return io.BytesIO(data[:2] + JFIF_APP0_SEGMENT + data[2:])
+    return str(image_path)
 
 
 def add_paragraph(doc: Document, text: str) -> None:
@@ -719,8 +864,9 @@ def add_checklist_item(doc: Document, text: str, *, checked: bool) -> None:
     add_inline_markdown(paragraph, text, size=11)
 
 
-def add_numbered_item(doc: Document, text: str) -> None:
+def add_numbered_item(doc: Document, text: str, *, num_id: int) -> None:
     paragraph = doc.add_paragraph(style="List Number")
+    apply_heading_number(paragraph, num_id=num_id, level=0)
     add_inline_markdown(paragraph, text, size=11)
 
 
@@ -737,6 +883,8 @@ def add_inline_markdown(
     bold: bool = False,
     color: str = "000000",
 ) -> None:
+    text = DANGLING_EVIDENCE_PATTERN.sub("", text)
+    text = HTML_BREAK_PATTERN.sub("\n", text)
     position = 0
     for match in INLINE_MARKDOWN_PATTERN.finditer(text):
         add_formatted_run(
@@ -801,15 +949,20 @@ def add_formatted_run(
 ) -> None:
     if not text:
         return
-    run = paragraph.add_run(text)
-    run.font.name = font
-    run._element.rPr.rFonts.set(qn("w:ascii"), font)
-    run._element.rPr.rFonts.set(qn("w:hAnsi"), font)
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), font)
-    run.font.size = Pt(size)
-    run.font.bold = bold
-    run.font.italic = italic
-    run.font.color.rgb = RGBColor.from_string(color)
+    segments = text.split("\n")
+    for index, segment in enumerate(segments):
+        if segment:
+            run = paragraph.add_run(segment)
+            run.font.name = font
+            run._element.rPr.rFonts.set(qn("w:ascii"), font)
+            run._element.rPr.rFonts.set(qn("w:hAnsi"), font)
+            run._element.rPr.rFonts.set(qn("w:eastAsia"), font)
+            run.font.size = Pt(size)
+            run.font.bold = bold
+            run.font.italic = italic
+            run.font.color.rgb = RGBColor.from_string(color)
+        if index < len(segments) - 1:
+            paragraph.add_run().add_break()
 
 
 def add_external_hyperlink(paragraph, text: str, url: str, *, size: float) -> None:
@@ -921,8 +1074,7 @@ def add_table(doc: Document, table: MarkdownTable) -> None:
         for idx, cell in enumerate(cells):
             set_cell_width(cell, widths[idx])
             set_cell_text(cell, row_values[idx] if idx < len(row_values) else "")
-        if sum(len(value) for value in row_values) <= 320:
-            set_row_cant_split(word_table.rows[row_index])
+        set_row_cant_split(word_table.rows[row_index])
     doc.add_paragraph("")
 
 
@@ -936,10 +1088,9 @@ def column_widths(count: int) -> list[int]:
     if count == 4:
         return [2300, 3200, 1800, 2060]
     if count == 5:
-        # Keep short categorical headers such as "Priority" on one line after
-        # cell padding is applied. The previous 800-twip first column left too
-        # little usable width and allowed Word to split the header mid-word.
-        return [900, 2115, 2115, 2115, 2115]
+        # Five-column field guides commonly put a multi-word stage or category
+        # in the first column and the longest narrative in the second.
+        return [1400, 2960, 1800, 1400, 1800]
     total = 9360
     first = 800
     rest = int((total - first) / (count - 1))

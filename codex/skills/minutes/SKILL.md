@@ -84,9 +84,10 @@ repository. Do not assume the input is a meeting.
   `content_audit.json` after drafting. Preserve dates, versions, quantities, ranges, units,
   conditions, exceptions, negation, limitations, Q&A, and source conflicts. Do not archive
   until the audit passes.
-- For every fresh-context strict job, read `references/quality-loop.md` and apply its
-  Ultra-derived evidence-ledger, reader-facing blueprint, and adversarial revision workflow.
-  Create hash-bound `evidence_ledger.json`, `document_blueprint.json`, and
+- `references/quality-loop.md` is the maintenance source for strict-job quality rules. The
+  launcher compiles its required evidence-ledger, reader-facing blueprint, and adversarial review
+  rules into the compact content prompt; a fresh worker must not reopen that reference. Create
+  hash-bound `evidence_ledger.json`, `document_blueprint.json`, and
   `content_quality_review.json`; the strict archive gate rejects a missing chunk, an unmapped
   required inventory item, an over-fragmented or citation-noisy reader document, a failed final
   check, or stale hashes.
@@ -102,7 +103,11 @@ repository. Do not assume the input is a meeting.
   for a controlled comparison.
 - A fresh content worker, identified by its prompt and `MINUTES_FRESH_CONTEXT=1`, must not launch
   another worker. It reads every byte-bounded, non-overlapping part in `evidence_chunks.json`
-  exactly once in manifest order, then completes inventory, drafting, audit, compact quality
+  exactly once in manifest order. Manifest line ranges are coordinates in the unsplit source, so
+  read each part as a whole and never reuse its path in another command. The launcher terminates a
+  duplicate part read. The compact prompt carries exact ledger/inventory/blueprint/audit/review
+  fields and enums; write large artifacts in one multi-file patch and run the absolute repository
+  `.venv/bin/python` freeze command without validator-source inspection. Then complete inventory, drafting, audit, compact quality
   review, and `content_freeze.json` in the source language when translation is required. It must
   not create a DOCX or archive. The optional translation turn receives only frozen `minutes.md`,
   writes `minutes.translated.md` as its final response without tools, and is accepted only after
@@ -111,11 +116,20 @@ repository. Do not assume the input is a meeting.
   ledger, inventory, or audit prose; it verifies the freeze and optional translation manifest,
   performs DOCX-only finalization, archives, and verifies. Valid content and translation artifacts
   are reused after delivery failure so evidence and translation are not repeated.
-- Treat a fresh worker as a production media job, not repository development. Read this skill
-  and each required reference once, and do not reread them. Do not inspect validator
-  implementations or tests unless a validator fails with an error that the skill cannot resolve.
+- Treat a fresh worker as a production media job, not repository development. Its preloaded phase
+  prompt is the complete operational contract. It must not invoke a skill or open `SKILL.md`,
+  `quality-loop.md`, `docx-validation.md`, or another instruction file. Do not inspect validator
+  implementations or tests unless a validator fails with an error that the phase contract cannot resolve.
   Do not run repository-wide compilation, test, lint, or git-review commands during a media job;
   deterministic artifact gates and launcher post-verification are the acceptance path.
+- Never concatenate files in a worker command. Target at most 16KB of model-visible output per
+  tool item. `run_fresh_codex_job.py` counts command output and file-change diffs; it terminates the
+  current phase on the first item over 20KB or any worker attempt to read the full instruction
+  files above. It also terminates a duplicate evidence-part read. The 20KB limit is fail-closed,
+  not truncation followed by continuation. Target at most 50 content and 25 delivery tool calls as
+  a cost objective without skipping evidence or all-page QA. `fresh_codex_handoff.json` must report
+  `worker_contract_passed=true`, zero oversized tool outputs, zero forbidden instruction reads,
+  and zero duplicate evidence chunk reads.
 - Read `worker_runtime_summary.json` for preprocessing, resource, speaker-policy, and speech-
   validation facts. Do not print the full `status.json`, `process_metrics.json`,
   `speaker_attribution_report.json`, or `speech_activity.json`; deterministic validators may read
@@ -181,9 +195,12 @@ This produces `minutes.translated.md` plus hash-bound `translation_manifest.json
 second content review and never reads STT, OCR, inventory, audit, ledger, or Snapshots. If source
 and target languages already match, this phase is skipped. The launcher then starts delivery.
 
-For `DOCX_ENABLED=true`, the delivery worker invokes the bundled `documents` skill and uses the
-`standard_business_brief` preset with its render-and-inspect contract. Generate a deterministic
-job-local draft, render into a clean directory, and run structural QA with one command:
+For `DOCX_ENABLED=true`, the delivery worker receives a compact preloaded contract instead of
+reading the full minutes and Documents skill files. `finalize_docx.py` applies the
+`standard_business_brief` preset and delegates rendering to the newest bundled Documents skill
+`render_docx.py`. The launcher disables Documents plugin injection inside fresh workers only; it
+does not remove the installed renderer used by the deterministic script. Generate a deterministic job-local draft, render into a clean directory, and run
+structural QA with one command:
 
 ```bash
 python scripts/finalize_docx.py prepare "<job-directory>"
@@ -193,6 +210,9 @@ Inspect every latest page PNG at 100%. The source-frozen Markdown and validated 
 not change for pagination. Revise
 only blocking layout defects and rerender once with `prepare --reuse-final`; warnings alone do not
 authorize another render. A third render requires an explicit supported `--blocking-defect-code`.
+The three-render production limit remains. One extra renderer-repair render is allowed only when
+the renderer fingerprint changed and a supported blocking defect is named; it cannot loop on the
+same renderer.
 After all pages pass, write compact `visual_review.json` and bind it deterministically:
 
 ```bash
@@ -214,6 +234,9 @@ records separate content/translation/delivery prompt hashes, phase elapsed time,
 `context_efficiency` records aggregate uncached input, cache ratio, input/output ratio, and bounded
 command-output pressure. Compare phase records on the next run; they do not replace strict content
 inventory and post-draft audit.
+`cached_input_tokens` is cumulative API prompt-cache accounting, not local disk-cache growth. A
+high cached ratio together with excessive tool calls means repeated growing context; clearing a
+local model cache does not solve it and can increase uncached cost.
 
 When the parent itself is running inside the macOS Codex seatbelt, launch
 `./scripts/run_fresh_codex_job.py` with initial `sandbox_permissions=require_escalated`.
@@ -234,8 +257,8 @@ is a direct child of configured `~/minutes/jobs`, then starts the worker with it
 
 ## DOCX Requirements
 
-Generate the job-local DOCX through `scripts/finalize_docx.py` when `DOCX_ENABLED=true`, then use
-the bundled `documents` skill as the visual shipping gate. A Codex or strict job without a valid
+Generate the job-local DOCX through `scripts/finalize_docx.py` when `DOCX_ENABLED=true`, use the
+bundled Documents renderer, and apply the compact visual shipping contract. A Codex or strict job without a valid
 content freeze, hash-matching `minutes.final.docx`, latest rendered pages, complete
 `visual_review.json`, and passed `docx_qa.json` must not archive.
 
@@ -274,7 +297,8 @@ retained job evidence. Specifically verify
 diarization stage appears in metrics. For Codex mode, verify `fresh_codex_handoff.json` reports
 isolated content and delivery phases, plus translation only when required; no parent conversation
 inheritance; no raw evidence outside content; matching input/Snapshot/final-Markdown hashes; and
-`state=completed`. A zero Codex exit code without completed
+`worker_contract.mode=preloaded_compact`; zero forbidden instruction reads and outputs over 20KB;
+and `state=completed`. A zero Codex exit code without completed
 `status.json` and real archived artifacts is a failure.
 
 ### Repository change verification
@@ -308,4 +332,5 @@ name, but unresolved identity must never cause content loss.
 ## References
 
 Read `references/docx-validation.md` when changing DOCX generation or testing DOCX output.
-Read `references/quality-loop.md` for every fresh-context strict Codex job.
+Read `references/quality-loop.md` when maintaining the compact content contract. Fresh media
+workers receive the compiled rules in their prompt and must not reopen either reference.
