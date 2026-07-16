@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import re
 import shlex
 import shutil
@@ -27,6 +28,8 @@ from scripts.content_quality import (
     BLUEPRINT_ROLES,
     LEDGER_CLASSIFICATIONS,
     MODEL_FINAL_CHECKS,
+    QUALITY_CONTRACT_VERSION,
+    REQUIRED_ITEM_DIMENSIONS,
     REQUIRED_FRONT_MATTER_KEYS,
 )
 from scripts.document_language import (
@@ -51,8 +54,12 @@ MAX_REQUEST_OVERRIDES = 4
 MAX_REQUEST_CHARS = 500
 MAX_CONSOLE_ERROR_CHARS = 500
 DRY_RUN_CONSOLE_BUDGET_BYTES = 8_000
-OVERSIZED_TOOL_OUTPUT_BYTES = 20_000
+OVERSIZED_TOOL_OUTPUT_BYTES = 24_000
 TOOL_OUTPUT_BUDGET_EXIT_CODE = 79
+CODEX_STALL_EXIT_CODE = 80
+CODEX_STREAM_HEARTBEAT_SECONDS = 10 * 60
+CODEX_STREAM_STALL_TIMEOUT_SECONDS = 15 * 60
+CODEX_STREAM_POLL_INTERVAL_SECONDS = 1.0
 MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS = 4
 FORBIDDEN_WORKER_INSTRUCTION_MARKERS = (
     "SKILL.md",
@@ -83,7 +90,7 @@ FRESH_PHASES = ("content", "translation", "delivery")
 TOOL_ROUND_TRIP_TARGETS = {
     "content": 50,
     "translation": 0,
-    "delivery": 25,
+    "delivery": 18,
 }
 WORKER_EVIDENCE_LINES_PER_CHUNK = 500
 WORKER_EVIDENCE_MAX_BYTES_PER_CHUNK = 15_000
@@ -113,6 +120,9 @@ class CodexStreamSummary:
     tool_output_budget_violations: list[dict[str, object]] = field(
         default_factory=list
     )
+    artifact_change_bytes: int = 0
+    max_artifact_change_bytes: int = 0
+    large_artifact_change_count: int = 0
     forbidden_instruction_read_count: int = 0
     forbidden_instruction_reads: list[dict[str, object]] = field(
         default_factory=list
@@ -122,6 +132,10 @@ class CodexStreamSummary:
     duplicate_evidence_chunk_reads: list[dict[str, object]] = field(
         default_factory=list
     )
+    stall_warning_count: int = 0
+    stalled: bool = False
+    last_event_elapsed_seconds: float = 0.0
+    stall_timeout_seconds: float | None = None
 
     def context_efficiency_fields(self) -> dict[str, object]:
         input_tokens = self.usage["input_tokens"]
@@ -150,6 +164,10 @@ class CodexStreamSummary:
             "tool_output_budget_violations": list(
                 self.tool_output_budget_violations
             ),
+            "artifact_change_bytes": self.artifact_change_bytes,
+            "max_artifact_change_bytes": self.max_artifact_change_bytes,
+            "large_artifact_change_count": self.large_artifact_change_count,
+            "large_artifact_change_threshold_bytes": OVERSIZED_TOOL_OUTPUT_BYTES,
             "forbidden_instruction_read_count": self.forbidden_instruction_read_count,
             "forbidden_instruction_reads": list(self.forbidden_instruction_reads),
             "evidence_chunk_read_count": len(self.evidence_chunk_paths_seen),
@@ -179,6 +197,15 @@ class CodexStreamSummary:
             "item_counts": dict(sorted(self.item_counts.items())),
             "context_efficiency": self.context_efficiency_fields(),
             "phase_checkpoints": list(self.phase_checkpoints),
+            "stall_monitor": {
+                "warning_count": self.stall_warning_count,
+                "stalled": self.stalled,
+                "last_event_elapsed_seconds": round(
+                    self.last_event_elapsed_seconds,
+                    3,
+                ),
+                "timeout_seconds": self.stall_timeout_seconds,
+            },
         }
 
 
@@ -526,6 +553,7 @@ def write_worker_evidence_chunks(
         manifest_path,
         {
             "schema_version": 1,
+            "quality_contract_version": QUALITY_CONTRACT_VERSION,
             "source_path": str(input_path),
             "source_bytes": input_path.stat().st_size,
             "source_sha256": sha256_file(input_path),
@@ -854,29 +882,38 @@ def record_codex_event(
     output = _model_visible_tool_output(item)
     if output:
         output_bytes = len(output.encode("utf-8"))
-        summary.tool_output_bytes += output_bytes
-        summary.max_tool_output_bytes = max(
-            summary.max_tool_output_bytes,
-            output_bytes,
-        )
-        if output_bytes > OVERSIZED_TOOL_OUTPUT_BYTES:
-            summary.oversized_tool_output_count += 1
-            if (
-                len(summary.tool_output_budget_violations)
-                < MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS
-            ):
-                preview = _tool_item_preview(item)
-                summary.tool_output_budget_violations.append(
-                    {
-                        "item_id": str(item.get("id", "")),
-                        "item_type": item_type,
-                        "output_bytes": output_bytes,
-                        "command": preview,
-                        "command_sha256": hashlib.sha256(
-                            str(item.get("command", "")).encode("utf-8")
-                        ).hexdigest(),
-                    }
-                )
+        if item_type == "file_change":
+            summary.artifact_change_bytes += output_bytes
+            summary.max_artifact_change_bytes = max(
+                summary.max_artifact_change_bytes,
+                output_bytes,
+            )
+            if output_bytes > OVERSIZED_TOOL_OUTPUT_BYTES:
+                summary.large_artifact_change_count += 1
+        else:
+            summary.tool_output_bytes += output_bytes
+            summary.max_tool_output_bytes = max(
+                summary.max_tool_output_bytes,
+                output_bytes,
+            )
+            if output_bytes > OVERSIZED_TOOL_OUTPUT_BYTES:
+                summary.oversized_tool_output_count += 1
+                if (
+                    len(summary.tool_output_budget_violations)
+                    < MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS
+                ):
+                    preview = _tool_item_preview(item)
+                    summary.tool_output_budget_violations.append(
+                        {
+                            "item_id": str(item.get("id", "")),
+                            "item_type": item_type,
+                            "output_bytes": output_bytes,
+                            "command": preview,
+                            "command_sha256": hashlib.sha256(
+                                str(item.get("command", "")).encode("utf-8")
+                            ).hexdigest(),
+                        }
+                    )
     if item_type == "command_execution":
         command = str(item.get("command", ""))
         if any(marker in command for marker in FORBIDDEN_WORKER_INSTRUCTION_MARKERS):
@@ -951,9 +988,17 @@ def run_codex_json_stream(
     events_path: Path,
     stderr_path: Path,
     progress_stream: TextIO,
+    heartbeat_seconds: float = CODEX_STREAM_HEARTBEAT_SECONDS,
+    stall_timeout_seconds: float = CODEX_STREAM_STALL_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = CODEX_STREAM_POLL_INTERVAL_SECONDS,
 ) -> tuple[int, CodexStreamSummary]:
     events_path.parent.mkdir(parents=True, exist_ok=True)
     summary = CodexStreamSummary()
+    if heartbeat_seconds <= 0 or stall_timeout_seconds <= heartbeat_seconds:
+        raise ValueError("stall timeout must be greater than the positive heartbeat")
+    if poll_interval_seconds <= 0:
+        raise ValueError("stream poll interval must be positive")
+    summary.stall_timeout_seconds = stall_timeout_seconds
     started = time.perf_counter()
     with (
         events_path.open("w", encoding="utf-8") as events_handle,
@@ -994,13 +1039,67 @@ def run_codex_json_stream(
             name="fresh-codex-stderr",
             daemon=True,
         )
+        stdout_queue: queue.Queue[str | None] = queue.Queue()
+
+        def drain_stdout() -> None:
+            for line in process.stdout:
+                stdout_queue.put(line)
+            stdout_queue.put(None)
+
+        stdout_thread = threading.Thread(
+            target=drain_stdout,
+            name="fresh-codex-stdout",
+            daemon=True,
+        )
         stderr_thread.start()
+        stdout_thread.start()
         try:
             process.stdin.write(prompt)
             process.stdin.close()
             budget_exceeded = False
+            stall_exceeded = False
             returncode: int
-            for line in process.stdout:
+            last_event_at = time.perf_counter()
+            next_warning_at = last_event_at + heartbeat_seconds
+            while True:
+                now = time.perf_counter()
+                timeout = min(
+                    poll_interval_seconds,
+                    max(0.001, next_warning_at - now),
+                    max(0.001, last_event_at + stall_timeout_seconds - now),
+                )
+                try:
+                    line = stdout_queue.get(timeout=timeout)
+                except queue.Empty:
+                    now = time.perf_counter()
+                    idle_seconds = now - last_event_at
+                    if idle_seconds >= stall_timeout_seconds:
+                        summary.stalled = True
+                        stall_exceeded = True
+                        print(
+                            "fresh Codex: stalled with no JSON events for "
+                            f"{idle_seconds:.1f}s; terminating phase",
+                            file=progress_stream,
+                            flush=True,
+                        )
+                        process.terminate()
+                        break
+                    if now >= next_warning_at:
+                        summary.stall_warning_count += 1
+                        print(
+                            "fresh Codex: no JSON events for "
+                            f"{idle_seconds:.1f}s; phase still running",
+                            file=progress_stream,
+                            flush=True,
+                        )
+                        next_warning_at = now + heartbeat_seconds
+                    continue
+                if line is None:
+                    break
+                now = time.perf_counter()
+                last_event_at = now
+                next_warning_at = now + heartbeat_seconds
+                summary.last_event_elapsed_seconds = now - started
                 events_handle.write(line)
                 events_handle.flush()
                 previous_violation_count = summary.oversized_tool_output_count
@@ -1060,13 +1159,17 @@ def run_codex_json_stream(
                     )
                     process.terminate()
                     break
-            if budget_exceeded:
+            if budget_exceeded or stall_exceeded:
                 try:
                     process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-                returncode = TOOL_OUTPUT_BUDGET_EXIT_CODE
+                returncode = (
+                    TOOL_OUTPUT_BUDGET_EXIT_CODE
+                    if budget_exceeded
+                    else CODEX_STALL_EXIT_CODE
+                )
             else:
                 returncode = process.wait()
         except BaseException:
@@ -1075,6 +1178,7 @@ def run_codex_json_stream(
             process.wait()
             raise
         finally:
+            stdout_thread.join()
             stderr_thread.join()
             if not process.stdin.closed:
                 process.stdin.close()
@@ -1119,6 +1223,7 @@ def build_fresh_prompt(
     blueprint_forms = "|".join(sorted(BLUEPRINT_FORM_FACTORS))
     front_matter_keys = "|".join(sorted(REQUIRED_FRONT_MATTER_KEYS))
     model_final_checks = "|".join(MODEL_FINAL_CHECKS)
+    required_item_dimensions = "|".join(REQUIRED_ITEM_DIMENSIONS)
     language_contract = (
         "Write validated minutes.md in the detected source language. Do not translate; the "
         "next phase translates it once without evidence."
@@ -1126,18 +1231,17 @@ def build_fresh_prompt(
         else "Write validated minutes.md in CONTENT_OUTPUT_LANGUAGE."
     )
     return (
-        "Fresh-context content worker for exactly one prepared media job. This prompt is the "
-        "preloaded compact content contract. Do not invoke a skill. Do not open SKILL.md. "
-        "Do not open quality-loop.md or any other instruction/reference file; their required production "
-        "rules are already compiled below.\n\n"
-        "Do not use the parent conversation or relaunch run_fresh_codex_job.py.\n\n"
+        "Fresh worker; preloaded compact content contract. Do not invoke a skill. "
+        "Do not open SKILL.md. "
+        "Do not open quality-loop.md or other references.\n\n"
+        "Do not relaunch run_fresh_codex_job.py.\n\n"
         f"Repository: {repo_root}\n"
         f"Job directory: {job_dir}\n"
-        f"Source evidence input (integrity only; do not read directly): {input_path}\n"
+        f"Evidence input (do not read): {input_path}\n"
         f"Evidence chunk manifest: {evidence_chunks_path}\n"
         f"Bounded evidence coverage summary: {evidence_summary_path}\n"
-        f"Bounded preprocessing/runtime summary: {runtime_summary_path}\n"
-        f"Selected snapshots directory: {snapshots_dir}\n"
+        f"Runtime summary: {runtime_summary_path}\n"
+        f"Snapshots: {snapshots_dir}\n"
         f"FINAL_OUTPUT_LANGUAGE={final_output_language}\n"
         f"CONTENT_OUTPUT_LANGUAGE={content_language}\n"
         f"TRANSLATION_REQUIRED={'true' if needs_translation else 'false'}\n"
@@ -1148,29 +1252,22 @@ def build_fresh_prompt(
         "Overrides:\n"
         f"{override_text}\n\n"
         f"Language contract: {language_contract}\n\n"
-        "This is a production media job. Do not reread this contract from repository files. Do not "
+        "This is a production media job. Do not reread this contract. Do not "
         "inspect validator implementations or tests. Do not run repository-wide py_compile, unittest "
         "discover, pytest, lint, or git review commands; the freeze is the acceptance gate.\n\n"
-        "Read worker_runtime_summary.json once; do not print raw status, metrics, speaker, or speech JSON. "
+        "Read worker_runtime_summary.json once; do not print raw status/metrics/speaker/speech JSON. "
         "Read evidence_chunks.json once and every listed chunk exactly once in manifest order. "
-        "Manifest start_line/end_line and source_start_line/source_end_line are coordinates in the "
-        "unsplit source, not ranges inside each part. For every chunks[].path, read the entire part "
-        "in one command such as `sed -n '1,999p' <path>`; never mention that part path in a second "
-        "command. A duplicate part read terminates the phase. Never concatenate chunk files; each "
-        "part contains complete timestamped STT/OCR and is <=15KB. Do not read "
-        "codex_minutes_input.md directly or use overlapping source ranges. Read "
-        "evidence_coverage_summary.json before authoring, "
-        "verify frame accounting and the maximum-gap gate, and inspect only material visual_only, "
-        "speaker_ui_change, and forced_coverage snapshots. Use only resolvable evidence refs in "
-        "the exact STT:HH:MM:SS-HH:MM:SS, OCR:HH:MM:SS, and "
-        "Snapshot:snapshot-NNNN@HH:MM:SS forms. "
-        "Do not read or print evidence_coverage.json; deterministic validators read the complete "
-        "raw ledger internally. Do not read or print fresh_codex_handoff.json. Do not recursively "
-        "list the job directory or frame directories. Never concatenate files in one command. "
-        "Keep each command output at or below 16KB; a 20KB result terminates this phase. Build one cumulative "
-        f"inventory without lossy intermediate summaries. Target <={TOOL_ROUND_TRIP_TARGETS['content']} "
-        "tool calls without skipping evidence or quality gates.\n\n"
-        "Exact strict sidecar contract; do not inspect validator source/tests or invent enums:\n"
+        "Read each chunks[].path whole in one command; manifest line fields are unsplit-source "
+        "coordinates. Duplicate reads terminate. Each part is <=15KB; never concatenate files. "
+        "Do not read codex_minutes_input.md directly. Read evidence_coverage_summary.json once; "
+        "verify accounting/max-gap and inspect only material "
+        "visual_only, speaker_ui_change, and forced_coverage snapshots. Use resolvable "
+        "STT:HH:MM:SS-HH:MM:SS, OCR:HH:MM:SS, or Snapshot:snapshot-NNNN@HH:MM:SS refs. "
+        "Do not read or print evidence_coverage.json; validators own the raw ledger. Do not read "
+        "or print fresh_codex_handoff.json. Do not recursively list the job directory or frames. "
+        "Keep command output <=16KB; 24KB terminates. Build one cumulative inventory without lossy "
+        f"summaries; target <={TOOL_ROUND_TRIP_TARGETS['content']} tool calls without skipping gates.\n\n"
+        f"Exact strict sidecar quality contract v{QUALITY_CONTRACT_VERSION}; do not inspect validator source/tests or invent enums:\n"
         f"- evidence_ledger.json: schema_version=1, status=completed, chunk_count; every chunk uses "
         f"index, source_sha256, classification({ledger_classifications}), rationale, material_topics[], "
         "inventory_item_ids[]. material/mixed needs topics+IDs; other classes need empty IDs.\n"
@@ -1185,34 +1282,58 @@ def build_fresh_prompt(
         "primary_inventory_item_ids[] and rationale when not applicable. H2 order must equal section "
         "order; assign every required item to exactly one primary section; use exactly one "
         "executive_synthesis and open_questions, operational_actions when actionable evidence exists, "
-        "and <=6 topic_analysis H2s.\n"
+        "and <=6 topic_analysis H2s. The final two H2s: `Items Requiring Further Verification`, "
+        "`External Evidence Check` (English) or `추가 검증이 필요한 항목`, `외부 근거 확인` "
+        "(Korean); keep both if not_applicable. mixed needs two of "
+        "prose/bullets/table/image; source_list needs a real Markdown link.\n"
+        "  visual_evidence_plan{status(embedded|limited|not_applicable),rationale,"
+        "items[{snapshot_path,section_id,purpose,reader_value}]}; embedded=3-5 distinct core "
+        "images, limited only when <3 exist; exact Markdown order, <=2/H2, no adjacent "
+        "full-width images, and content after the last image.\n"
         "- content_audit.json: schema_version=1, status=passed, covered_item_ids, missing_item_ids=[], "
         "qualifier_changes=[], silent_conflicts=[], documented_conflict_ids, coverage[{item_id,"
         "document_refs:[unique verbatim minutes text]}], conflict_coverage with conflict_id, "
         "recording_fidelity{preserved_item_ids,rewritten_by_external_source_item_ids:[]}, and "
         "intentional_omissions[]. Every required item must be covered and evidenced.\n"
-        f"- content_quality_review.json: schema_version=3, status=passed, one review_cycles entry "
-        f"{{cycle:1,status:passed,findings:[],changes:[]}}, and final_checks with exactly "
-        f"{model_final_checks}; every check is {{status:passed,finding:nonempty}}. Do not add bindings "
-        "or document_signals; content_freeze fills them. Use a second cycle only after one named "
-        "targeted revision. Structural validity alone is not a quality pass.\n"
-        "- official_sources.json when nothing remains to verify: schema_version=1, "
-        "status=not_applicable, ISO-8601 checked_at, policy=official_only, nonempty reason, claims:[], "
-        "privacy:{raw_transcript_or_ocr_sent:false}.\n\n"
-        "Complete only the evidence, inventory, blueprint, Markdown, content audit, and content "
-        "quality stages. Do not delete, move, recreate, or hash raw frames/Snapshots; validators "
-        "own frame accounting. Preserve every referenced or substantively useful Snapshot and "
-        "verify all Markdown Snapshot refs resolve. Do not "
-        "treat raw Snapshot count as the evidence-coverage gate. Follow the artifact order "
+        "Keep reader-facing raw STT/OCR/Snapshot refs outside evidence appendices <=2; sidecars own detailed traceability.\n"
+        f"- content_quality_review.json: schema_version=3,status=passed,review_cycles "
+        f"{{cycle:1,status:passed,findings:[],changes:[]}}, final_checks exactly "
+        f"{model_final_checks}, each passed with a finding. required_item_checks uses exactly "
+        "item_id, section_id, dimensions (never `checks`, inventory_item_id, or primary_section_id). "
+        f"dimensions contains exactly {required_item_dimensions}; "
+        "core_facts=covered; others use covered+verbatim refs or not_applicable+rationale. Every "
+        "covered document_ref must be an exact substring of that primary H2, including Markdown "
+        "markers when present; a matching phrase in another H2 does not count. "
+        "For a revision, the revised cycle owns nonempty findings, changes, and target_section_ids; "
+        "cycle 2 is passed with empty findings/changes. For LOW_INFORMATION_DENSITY, keep "
+        "content_density_baseline.json; use exactly its validator-selected substantive targets and required minimum gains. "
+        "No document/section character maximum; include all evidence-backed conditions, risks, impacts, and actions. "
+        "Appendices/filler do not count. Preserve exact audit/review document_refs "
+        "with additive edits. "
+        "Do not patch review_cycles for this warning; content_freeze writes deterministic revised/pass cycles "
+        "after the gains pass. Structural validity "
+        "alone is not a quality pass.\n"
+        "- Auto checks unresolved public support/version/release/EOL/policy/security/API claims; a "
+        "presenter estimate is no exemption. N/A official_sources: schema_version=1,status=not_applicable,"
+        "current offset checked_at (not future),policy=official_only,appendix_heading,reason,claims:[],"
+        "privacy:{raw_transcript_or_ocr_sent:false}; final external section repeats reason/date/disclosures.\n\n"
+        "Complete only content artifacts. Do not delete, move, recreate, or hash raw frames/Snapshots; "
+        "validators own frame accounting. Preserve useful Snapshots and verify all Markdown Snapshot "
+        "refs resolve. Do not treat raw Snapshot count as the evidence-coverage gate. Follow "
         "ledger/inventory → blueprint → sources → minutes → audit/quality review → content "
-        "freeze. After evidence/snapshot review, create all large artifacts in one multi-file "
-        "apply_patch call and do not read them back or run custom jq/Python prechecks. Run exactly "
+        "freeze. Create large artifacts once in one multi-file apply_patch; no reread or custom "
+        "precheck. Run exactly "
         f"`{freeze_command}`; it fills deterministic bindings, reruns all content gates, and writes "
-        "content_freeze.json. Do not create, edit, render, or inspect a DOCX. Do not run "
-        "archive_job.py and do not change status.json to completed. Stop after the freeze verifies. "
-        "If freeze fails, correct all named issues in one patch and retry once; do not open validator "
-        "code. Write each large artifact once; never print or reread full artifacts/diffs. Keep the "
-        "final response concise and report only the content freeze hash and validation result.\n"
+        "content_freeze.json. Do not create, edit, render, or inspect a DOCX; do not archive or mark "
+        "completed. On first failure, inspect only the named JSON entries and H2 sections <=16KB and fix "
+        "minutes/blueprint in one patch without rewriting unrelated sections. Never direct-patch audit/review "
+        "JSON after freeze. For stale refs, create content_review_patch.json with schema_version=1 plus "
+        "audit_coverage_updates[{item_id,document_refs}] and/or review_dimension_updates"
+        "[{item_id,dimension,status,document_refs|rationale}], then run "
+        "`.venv/bin/python scripts/apply_content_review_patch.py \"$MINUTES_JOB_DIR\"`. Retry freeze. If only "
+        "stale refs remain, allow one final helper patch/freeze without editing minutes.md. After a "
+        "failed patch, stop without rerunning freeze. Do not "
+        "open validator code or print/reread full artifacts or diffs.\n"
     )
 
 
@@ -1267,8 +1388,8 @@ def build_delivery_prompt(
     return (
         "Fresh-context visual delivery worker for one content-frozen job. This prompt is the "
         "preloaded compact delivery contract. Do not invoke a skill. Do not open any SKILL.md or "
-        "instruction/reference file. `finalize_docx.py` already applies the repository's Word "
-        "preset and bundled Documents renderer deterministically.\n\n"
+        "instruction/reference file. `finalize_docx.py` already fills the bundled retained Word "
+        "template and invokes the Documents renderer deterministically; do not reconstruct the layout.\n\n"
         "This is a new ephemeral execution with no parent or content-worker conversation. "
         "Do not launch run_fresh_codex_job.py again.\n\n"
         f"Repository: {repo_root}\n"
@@ -1285,25 +1406,35 @@ def build_delivery_prompt(
         "those files without returning them to you. Do not print the full final Markdown or DOCX "
         "XML. Read only bounded content_freeze.json fields and document_blueprint.json once. Run "
         f"`{freeze_verify_command}` before Word work. "
-        "Never concatenate files in one command. Keep each command output at or below 16KB; a "
-        f"20KB result terminates this phase. Target <={TOOL_ROUND_TRIP_TARGETS['delivery']} tool "
+        "Never concatenate files in one command. Keep each command/read output at or below 16KB; a "
+        "24KB command/read result terminates this phase. This console limit never limits final Markdown, "
+        "DOCX, or file-change size. "
+        "Do not recursively list the job directory, frames, snapshots, or render directory; use only "
+        "the exact paths and commands named by this contract. "
+        f"Target <={TOOL_ROUND_TRIP_TARGETS['delivery']} tool "
         "calls without skipping all-page QA.\n\n"
         f"{translation_contract}\n\n"
-        "The frozen Markdown is immutable, and the validated final Markdown is immutable. Do not "
+        "The frozen Markdown is immutable, and the validated final Markdown is immutable. It has no "
+        "document or section character maximum. Do not "
         "rewrite, shorten, translate, polish, or reorganize either file for pagination. "
         "If you find a genuine semantic blocker, write semantic_blocker.json with the exact section "
         "and reason, then fail without archiving. Otherwise use only layout-preserving DOCX edits.\n\n"
-        f"Run `{prepare_command}` once. It generates the draft "
-        "and final DOCX, cleans the render directory, renders every page, and runs structural QA in "
-        "one bounded command. Inspect every latest page PNG at 100% zoom. Blocking defects are: "
+        f"Run `{prepare_command}` once. It copies the retained template, fills its cover/TOC/body slots, "
+        "creates the draft and final DOCX, cleans the render directory, renders every page once, and runs "
+        "structural QA in one bounded command. Inspect every latest page PNG at 100% zoom. Deterministic and visual "
+        "blocking defects are: "
         "clipped or overlapping text, missing glyph/content, blank interior page, broken TOC or "
-        "bookmark, unreadable table, incorrect list numbering, and orphan heading or split row. A short final page, whitespace "
-        "on a single TOC page, intentional section whitespace, and mild readable wrapping are "
-        "nonblocking warnings. Do not revise for warnings alone.\n\n"
+        "bookmark, unreadable table, incorrect list numbering, orphan heading or split row, "
+        "excessive interior layout gap, adjacent large images, or image placement drift. A naturally short "
+        "final page is NATURAL_FINAL_PAGE_WHITESPACE, a nonblocking warning, alongside single-page TOC "
+        "whitespace, intentional section whitespace, and mild readable wrapping. Never reflow or add filler "
+        "merely to fill the final page; do not revise for warnings alone.\n\n"
         "If a blocking defect exists, edit only minutes.final.docx and run "
         f"`{reuse_command}` once. A third render "
         "is forbidden unless a blocking defect remains; then pass its exact supported code through "
-        "--blocking-defect-code. Write visual_review.json with schema_version=1, status=passed, the "
+        "--blocking-defect-code. Do not increase paragraph spacing, insert blank lines, or move content "
+        "downward to manipulate page occupancy. Preserve all complete, evidence-backed content. "
+        "Write visual_review.json with schema_version=1, status=passed, the "
         "complete ordered inspected_pages list, empty blocking_defects, and warnings using only the "
         f"documented nonblocking codes. Run `{approve_command}`; "
         f"the command adds hashes and creates passed docx_qa.json. Then run `{archive_command}` and verify "
@@ -1327,7 +1458,10 @@ def build_translation_prompt(
         "list types, checklist states, image paths, link URLs, inline-code literals, evidence "
         "references, timestamps, numeric values, units, product names, acronyms, and code. Translate "
         "the title, headings, prose, table labels/cells, captions, and metadata labels naturally. "
-        f"Set the output-language metadata value to {metadata_value}. Do not summarize, omit, add, "
+        f"Set the output-language metadata value to {metadata_value}. When present, render the final "
+        f"trust headings exactly as `## {'추가 검증이 필요한 항목' if target_label == 'Korean' else 'Items Requiring Further Verification'}` "
+        f"then `## {'외부 근거 확인' if target_label == 'Korean' else 'External Evidence Check'}`. "
+        "Do not summarize, omit, add, "
         "fact-check, reinterpret, or polish beyond natural target-language phrasing.\n\n"
         "--- BEGIN SOURCE MARKDOWN ---\n"
         f"{source_markdown.rstrip()}\n"
@@ -1396,6 +1530,9 @@ def aggregate_phase_records(
     max_tool_output_bytes = 0
     oversized_tool_output_count = 0
     tool_output_budget_violations: list[dict[str, object]] = []
+    artifact_change_bytes = 0
+    max_artifact_change_bytes = 0
+    large_artifact_change_count = 0
     forbidden_instruction_read_count = 0
     forbidden_instruction_reads: list[dict[str, object]] = []
     evidence_chunk_read_count = 0
@@ -1442,6 +1579,15 @@ def aggregate_phase_records(
                     tool_output_budget_violations.append(
                         {"phase": phase, **dict(violation)}
                     )
+            value = efficiency.get("artifact_change_bytes", 0)
+            if isinstance(value, int):
+                artifact_change_bytes += value
+            value = efficiency.get("max_artifact_change_bytes", 0)
+            if isinstance(value, int):
+                max_artifact_change_bytes = max(max_artifact_change_bytes, value)
+            value = efficiency.get("large_artifact_change_count", 0)
+            if isinstance(value, int):
+                large_artifact_change_count += value
             value = efficiency.get("forbidden_instruction_read_count", 0)
             if isinstance(value, int):
                 forbidden_instruction_read_count += value
@@ -1493,6 +1639,10 @@ def aggregate_phase_records(
             "tool_output_budget_violations": tool_output_budget_violations[
                 :MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS
             ],
+            "artifact_change_bytes": artifact_change_bytes,
+            "max_artifact_change_bytes": max_artifact_change_bytes,
+            "large_artifact_change_count": large_artifact_change_count,
+            "large_artifact_change_threshold_bytes": OVERSIZED_TOOL_OUTPUT_BYTES,
             "forbidden_instruction_read_count": forbidden_instruction_read_count,
             "forbidden_instruction_reads": forbidden_instruction_reads[
                 :MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS
@@ -1730,6 +1880,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             "tool_output_target_bytes": 16_000,
             "tool_output_hard_limit_bytes": OVERSIZED_TOOL_OUTPUT_BYTES,
             "hard_limit_action": "terminate_phase",
+            "stream_heartbeat_seconds": CODEX_STREAM_HEARTBEAT_SECONDS,
+            "stream_stall_timeout_seconds": CODEX_STREAM_STALL_TIMEOUT_SECONDS,
+            "stream_stall_exit_code": CODEX_STALL_EXIT_CODE,
             "tool_round_trip_targets": {
                 phase: TOOL_ROUND_TRIP_TARGETS[phase]
                 for phase in planned_phases
@@ -1832,6 +1985,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                     raise RuntimeError(
                         "fresh Codex content phase violated the worker output/contract guard"
                     )
+                if returncode == CODEX_STALL_EXIT_CODE:
+                    raise RuntimeError(
+                        "fresh Codex content phase stalled for 15 minutes without JSON events"
+                    )
                 raise RuntimeError(
                     f"fresh Codex content phase exited with status {returncode}"
                 )
@@ -1909,6 +2066,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                             "fresh Codex translation phase violated the worker "
                             "output/contract guard"
                         )
+                    if returncode == CODEX_STALL_EXIT_CODE:
+                        raise RuntimeError(
+                            "fresh Codex translation phase stalled for 15 minutes "
+                            "without JSON events"
+                        )
                     raise RuntimeError(
                         "fresh Codex translation phase exited with status "
                         f"{returncode}"
@@ -1962,6 +2124,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             if returncode == TOOL_OUTPUT_BUDGET_EXIT_CODE:
                 raise RuntimeError(
                     "fresh Codex delivery phase violated the worker output/contract guard"
+                )
+            if returncode == CODEX_STALL_EXIT_CODE:
+                raise RuntimeError(
+                    "fresh Codex delivery phase stalled for 15 minutes without JSON events"
                 )
             raise RuntimeError(
                 f"fresh Codex delivery phase exited with status {returncode}"

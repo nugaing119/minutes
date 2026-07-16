@@ -14,6 +14,7 @@ from scripts.docx_qa import create_docx_qa
 from scripts.docx_report import generate_docx_report
 
 from scripts.run_fresh_codex_job import (
+    CODEX_STALL_EXIT_CODE,
     CodexStreamSummary,
     DEFAULT_REASONING_EFFORT,
     DRY_RUN_CONSOLE_BUDGET_BYTES,
@@ -130,8 +131,30 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertIn("Do not open SKILL.md", prompt)
         self.assertIn("Do not open quality-loop.md", prompt)
         self.assertIn("reader-facing document blueprint", prompt)
+        self.assertIn("Items Requiring Further Verification", prompt)
+        self.assertIn("External Evidence Check", prompt)
+        self.assertIn("final two H2s", prompt)
+        self.assertIn("presenter estimate", prompt)
         self.assertIn("ledger/inventory → blueprint", prompt)
         self.assertIn("Structural validity alone is not a quality pass", prompt)
+        self.assertIn("required_item_checks", prompt)
+        self.assertIn("never `checks`", prompt)
+        self.assertIn("revised cycle owns nonempty findings, changes, and target_section_ids", prompt)
+        self.assertIn("raw STT/OCR/Snapshot refs outside evidence appendices <=2", prompt)
+        self.assertIn("source_list needs a real Markdown link", prompt)
+        self.assertIn("exact substring of that primary H2", prompt)
+        self.assertIn("inspect only the named JSON entries and H2 sections", prompt)
+        self.assertIn("target_section_ids", prompt)
+        self.assertIn("LOW_INFORMATION_DENSITY", prompt)
+        self.assertIn("content_density_baseline.json", prompt)
+        self.assertIn("validator-selected substantive", prompt)
+        self.assertIn("Do not patch review_cycles", prompt)
+        self.assertIn("content_freeze writes deterministic revised/pass cycles", prompt)
+        self.assertIn("apply_content_review_patch.py", prompt)
+        self.assertIn("Never direct-patch audit/review", prompt)
+        self.assertIn("After a failed patch, stop without rerunning freeze", prompt)
+        self.assertIn("3-5", prompt)
+        self.assertIn("adjacent full-width", prompt)
         self.assertIn("content_freeze.json", prompt)
         self.assertIn("schema_version=3", prompt)
         self.assertIn("Do not create, edit, render, or inspect a DOCX", prompt)
@@ -142,9 +165,9 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertIn("Do not reread", prompt)
         self.assertNotIn("$minutes", prompt)
         self.assertNotIn(sentinel, prompt)
-        self.assertLess(len(prompt.encode("utf-8")), 8_000)
+        self.assertLess(len(prompt.encode("utf-8")), 9_000)
 
-    def test_delivery_prompt_uses_only_frozen_content_and_bounded_docx_loop(self) -> None:
+    def test_delivery_prompt_uses_frozen_content_and_retained_template(self) -> None:
         prompt = build_delivery_prompt(
             Path("/tmp/repo"),
             Path("/tmp/minutes/jobs/job"),
@@ -152,8 +175,10 @@ class FreshCodexJobTests(unittest.TestCase):
         )
 
         self.assertIn("preloaded compact delivery contract", prompt)
-        self.assertIn("bundled Documents renderer", prompt)
+        self.assertIn("bundled retained Word", prompt)
         self.assertIn("Do not open any SKILL.md", prompt)
+        self.assertIn("Do not recursively list the job directory", prompt)
+        self.assertIn("frames, snapshots, or render directory", prompt)
         self.assertIn("content_freeze.json", prompt)
         self.assertIn("minutes.translated.md", prompt)
         self.assertIn("translation.py", prompt)
@@ -161,7 +186,13 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertIn("frozen Markdown is immutable", prompt)
         self.assertIn("finalize_docx.py prepare", prompt)
         self.assertIn("Inspect every latest page PNG at 100% zoom", prompt)
-        self.assertIn("nonblocking warnings", prompt)
+        self.assertIn("NATURAL_FINAL_PAGE_WHITESPACE", prompt)
+        self.assertIn("Never reflow or add filler", prompt)
+        self.assertIn("no document or section character maximum", prompt)
+        self.assertIn("console limit never limits", prompt)
+        self.assertIn("fills its cover/TOC/body slots", prompt)
+        self.assertIn("blocking defects", prompt)
+        self.assertNotIn("SHORT_FINAL_PAGE", prompt)
         self.assertIn("--blocking-defect-code", prompt)
         self.assertIn("archive_job.py", prompt)
         self.assertNotIn("$documents", prompt)
@@ -179,6 +210,8 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertIn("numeric values", prompt)
         self.assertIn(source.strip(), prompt)
         self.assertIn("Set the output-language metadata value to 한국어", prompt)
+        self.assertIn("## 추가 검증이 필요한 항목", prompt)
+        self.assertIn("## 외부 근거 확인", prompt)
 
     def test_phase_aggregation_keeps_content_and_delivery_costs_separable(self) -> None:
         aggregate = aggregate_phase_records(
@@ -215,6 +248,9 @@ class FreshCodexJobTests(unittest.TestCase):
                         "tool_output_bytes": 500,
                         "max_tool_output_bytes": 300,
                         "oversized_tool_output_count": 0,
+                        "artifact_change_bytes": 2_000,
+                        "max_artifact_change_bytes": 2_000,
+                        "large_artifact_change_count": 0,
                     },
                 },
             }
@@ -226,6 +262,10 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertEqual(
             aggregate["item_counts"],
             {"command_execution": 4, "file_change": 1},
+        )
+        self.assertEqual(
+            aggregate["context_efficiency"]["artifact_change_bytes"],
+            2_000,
         )
 
     def test_evidence_manifest_hashes_full_input_and_bounds_directory_records(self) -> None:
@@ -424,6 +464,7 @@ class FreshCodexJobTests(unittest.TestCase):
             )
 
         self.assertEqual(manifest["chunk_count"], 3)
+        self.assertEqual(manifest["quality_contract_version"], 2)
         self.assertEqual(
             [
                 (item["start_line"], item["end_line"])
@@ -616,6 +657,15 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertEqual(fields["token_usage"]["input_tokens"], 120)
         self.assertEqual(
             fields["context_efficiency"]["oversized_tool_output_count"],
+            0,
+        )
+        self.assertEqual(fields["context_efficiency"]["tool_output_bytes"], 0)
+        self.assertEqual(
+            fields["context_efficiency"]["artifact_change_bytes"],
+            len(large_diff.encode("utf-8")),
+        )
+        self.assertEqual(
+            fields["context_efficiency"]["large_artifact_change_count"],
             1,
         )
         self.assertIn("fresh Codex: started", console)
@@ -678,7 +728,7 @@ class FreshCodexJobTests(unittest.TestCase):
                     "sys.stdin.read()",
                     "print(json.dumps({'type': 'item.completed', 'item': "
                     "{'id': 'tool-1', 'type': 'command_execution', "
-                    "'command': 'cat large-file', 'aggregated_output': 'x' * 20001}}), flush=True)",
+                    "'command': 'cat large-file', 'aggregated_output': 'x' * 24001}}), flush=True)",
                     "time.sleep(0.2)",
                     "print(json.dumps({'type': 'item.completed', 'item': "
                     "{'id': 'message-1', 'type': 'agent_message', 'text': 'too late'}}), flush=True)",
@@ -774,6 +824,43 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertIn("duplicate evidence chunk read", progress.getvalue())
         self.assertNotIn("too late", event_log)
 
+    def test_json_stream_terminates_a_silent_stalled_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            events_path = root / "events.jsonl"
+            stderr_path = root / "stderr.log"
+            progress = io.StringIO()
+            child_code = "\n".join(
+                (
+                    "import json, sys, time",
+                    "sys.stdin.read()",
+                    "print(json.dumps({'type': 'thread.started', 'thread_id': 't-1'}), flush=True)",
+                    "time.sleep(2)",
+                    "print(json.dumps({'type': 'turn.completed', 'usage': {}}), flush=True)",
+                )
+            )
+
+            returncode, summary = run_codex_json_stream(
+                [sys.executable, "-c", child_code],
+                prompt="bounded prompt",
+                env={},
+                events_path=events_path,
+                stderr_path=stderr_path,
+                progress_stream=progress,
+                heartbeat_seconds=0.05,
+                stall_timeout_seconds=0.15,
+                poll_interval_seconds=0.01,
+            )
+
+            event_log = events_path.read_text(encoding="utf-8")
+
+        self.assertEqual(returncode, CODEX_STALL_EXIT_CODE)
+        self.assertTrue(summary.stalled)
+        self.assertGreaterEqual(summary.stall_warning_count, 1)
+        self.assertIn("no JSON events", progress.getvalue())
+        self.assertIn("stalled", progress.getvalue())
+        self.assertNotIn("turn.completed", event_log)
+
     def test_json_stream_archives_full_events_but_emits_bounded_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -786,7 +873,7 @@ class FreshCodexJobTests(unittest.TestCase):
                     "sys.stdin.read()",
                     "print(json.dumps({'type': 'thread.started', 'thread_id': 't-1'}))",
                     "print(json.dumps({'type': 'item.completed', 'item': "
-                    "{'id': 'tool-1', 'type': 'file_change', 'changes': 'DIFF-' + 'x' * 5000}}))",
+                    "{'id': 'tool-1', 'type': 'file_change', 'changes': 'DIFF-' + 'x' * 25000}}))",
                     "print(json.dumps({'type': 'turn.completed', 'usage': "
                     "{'input_tokens': 9, 'cached_input_tokens': 2, "
                     "'output_tokens': 3, 'reasoning_output_tokens': 1}}))",
@@ -811,6 +898,8 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertEqual(returncode, 0)
         self.assertEqual(summary.usage["input_tokens"], 9)
         self.assertEqual(len(summary.tool_item_ids), 1)
+        self.assertEqual(summary.oversized_tool_output_count, 0)
+        self.assertEqual(summary.large_artifact_change_count, 1)
         self.assertIn("DIFF-", event_log)
         self.assertIn("ordinary diagnostic", stderr_log)
         self.assertIn("fatal: synthetic failure detail", stderr_log)

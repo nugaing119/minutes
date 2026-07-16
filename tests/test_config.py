@@ -54,8 +54,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.official_source_verification, "off")
         self.assertEqual(settings.ocr_languages, "auto")
         self.assertEqual(settings.ocr_frame_interval_seconds, 5)
-        self.assertEqual(settings.ocr_ffmpeg_threads, 4)
-        self.assertEqual(settings.ocr_workers, 5)
+        self.assertEqual(settings.ocr_ffmpeg_threads, 2)
+        self.assertEqual(settings.ocr_workers, 3)
+        self.assertEqual(settings.ocr_prestart_cooldown_seconds, 20.0)
         self.assertEqual(settings.ocr_max_snapshot_gap_seconds, 120)
         self.assertEqual(settings.ocr_visual_only_min_mean_delta, 12.0)
         self.assertEqual(settings.ocr_frame_extract_cpu_limit_percent, 0)
@@ -199,6 +200,20 @@ class ConfigTests(unittest.TestCase):
                 patch("scripts.config.get_secret", return_value=None),
             ):
                 with self.assertRaisesRegex(ValueError, "OCR_WORKERS"):
+                    load_settings()
+
+    def test_ocr_ffmpeg_threads_and_cooldown_are_bounded(self) -> None:
+        for env, expected_error in (
+            ({"OCR_FFMPEG_THREADS": "0"}, "OCR_FFMPEG_THREADS"),
+            ({"OCR_FFMPEG_THREADS": "17"}, "OCR_FFMPEG_THREADS"),
+            ({"OCR_PRESTART_COOLDOWN_SECONDS": "-0.1"}, "OCR_PRESTART_COOLDOWN_SECONDS"),
+        ):
+            with (
+                self.subTest(env=env),
+                patch.dict(os.environ, env, clear=True),
+                patch("scripts.config.get_secret", return_value=None),
+            ):
+                with self.assertRaisesRegex(ValueError, expected_error):
                     load_settings()
 
 

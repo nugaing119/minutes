@@ -10,6 +10,11 @@ repository. Do not assume the input is a meeting.
 
 ## Core Contract
 
+- The parent/orchestrator must load this `SKILL.md` and the `documents` `SKILL.md` in separate
+  tool calls. Never batch, concatenate, or parallelize their reads into one model-visible result.
+  Keep each read at or below 16 KB; split a longer file into deterministic, non-overlapping line
+  ranges and continue to EOF before preprocessing. Fresh production workers receive compiled
+  contracts and must not reopen either skill.
 - Default input is `~/remind`; default work/output root is `~/minutes`.
 - Supported extensions are `.mp4`, `.mkv`, `.mov`, `.m4a`, `.mp3`, `.wav`, `.aac`,
   `.flac`, and `.ogg`.
@@ -68,10 +73,12 @@ repository. Do not assume the input is a meeting.
   OCR frames, their SHA-256 manifest, and selected Snapshots through content audit, DOCX render
   review, archive verification, and the completed-job retention window; only the verified
   completed-job purge removes them.
-- Use `OCR_WORKERS` for bounded frame-level parallelism and keep
-  `OCR_TESSERACT_THREAD_LIMIT=1`. Apply parallel results in timestamp order so visual/text
-  dedupe and Snapshot numbering remain deterministic. Respect the configured worker value;
-  do not derive or change it from a machine-specific CPU benchmark.
+- Use `OCR_WORKERS` for bounded frame-level parallelism, `OCR_FFMPEG_THREADS` for decoder
+  parallelism, and keep `OCR_TESSERACT_THREAD_LIMIT=1`. The thermal-balanced default is
+  3 workers, 2 FFmpeg threads, and a 20-second `OCR_PRESTART_COOLDOWN_SECONDS` gap after
+  STT/speech validation. Apply parallel results in timestamp order so visual/text dedupe and
+  Snapshot numbering remain deterministic. Respect each configured value; do not derive or change it
+  from a machine-specific CPU benchmark or increase it automatically.
 - For video, read the bounded `evidence_coverage_summary.json` before inventory authoring. Do not
   open or print the full `evidence_coverage.json`; deterministic validators read that raw ledger
   internally. Require complete raw-frame accounting, valid raw/Snapshot hashes, and a maximum selected-Snapshot gap no greater than
@@ -89,8 +96,11 @@ repository. Do not assume the input is a meeting.
   rules into the compact content prompt; a fresh worker must not reopen that reference. Create
   hash-bound `evidence_ledger.json`, `document_blueprint.json`, and
   `content_quality_review.json`; the strict archive gate rejects a missing chunk, an unmapped
-  required inventory item, an over-fragmented or citation-noisy reader document, a failed final
-  check, or stale hashes.
+  required inventory item, a required item lacking condition/risk/impact/action treatment where
+  applicable, an over-fragmented or citation-noisy reader document, an unsafe image plan, a failed
+  final check, or stale hashes. A long sparse draft raises `LOW_INFORMATION_DENSITY` and receives
+  one section-targeted evidence review; it is not padded to a word target. Document and section
+  length have no maximum. Density values are minimum completeness requirements, not output caps.
 - If evidence exceeds one context, read it sequentially by timestamp into one cumulative
   inventory. Do not create lossy section summaries and summarize them again.
 - Keep the preprocessing conversation out of document synthesis. Outside a fresh worker,
@@ -122,11 +132,13 @@ repository. Do not assume the input is a meeting.
   implementations or tests unless a validator fails with an error that the phase contract cannot resolve.
   Do not run repository-wide compilation, test, lint, or git-review commands during a media job;
   deterministic artifact gates and launcher post-verification are the acceptance path.
-- Never concatenate files in a worker command. Target at most 16KB of model-visible output per
-  tool item. `run_fresh_codex_job.py` counts command output and file-change diffs; it terminates the
-  current phase on the first item over 20KB or any worker attempt to read the full instruction
-  files above. It also terminates a duplicate evidence-part read. The 20KB limit is fail-closed,
-  not truncation followed by continuation. Target at most 50 content and 25 delivery tool calls as
+- Never concatenate files in a worker command. Target at most 16KB of model-visible command/read
+  output per tool item. `run_fresh_codex_job.py` terminates the current phase on the first such
+  result over 24KB or any worker attempt to read the full instruction files above. It records
+  file-change diffs separately as artifact-change metrics; they do not trigger the 24KB stop and
+  never cap Markdown or DOCX size. It also terminates a duplicate evidence-part read. The command
+  output limit is fail-closed, not truncation followed by continuation. Target at most 50 content
+  and 18 delivery tool calls as
   a cost objective without skipping evidence or all-page QA. `fresh_codex_handoff.json` must report
   `worker_contract_passed=true`, zero oversized tool outputs, zero forbidden instruction reads,
   and zero duplicate evidence chunk reads.
@@ -136,12 +148,21 @@ repository. Do not assume the input is a meeting.
   those raw files without returning their large arrays to the model.
 - The recording remains the source of truth for what was said. With
   `OFFICIAL_SOURCE_VERIFICATION=auto`, inspect local audio context, timestamped STT, OCR,
-  and relevant Snapshots first. Use current official documents only to clarify remaining
-  ambiguity or disclose a conflict; never rewrite a clear recorded statement.
-- When external sources are used, append the final `## 외부 근거 확인` or
-  `## External Evidence Check`, separating supporting transcription/OCR evidence from
-  evidence that conflicts with the video. Include timestamp, purpose, finding, checked
-  date, and official links. No H2 section may follow it.
+  and relevant Snapshots first. Verify unresolved, publicly checkable product support,
+  version, release/EOL, policy, security, and API claims with current official documents;
+  a presenter explanation or estimate is not an exemption. Preserve its qualifier and never
+  rewrite a clear recorded statement. Keep internal decisions and POC measurements as local
+  verification items when no authoritative public source applies.
+- Always finish a verification-enabled document with the two functional H2s
+  `## 추가 검증이 필요한 항목` then `## 외부 근거 확인`, or
+  `## Items Requiring Further Verification` then `## External Evidence Check`. Let Word
+  numbering follow the preceding dynamic topic sections; do not hardcode section numbers.
+  Keep both H2s when either result is `not_applicable`, displaying the concrete reason and
+  checked date instead of deleting the trust control. The external section must also state
+  that the recording remains authoritative and that raw STT/OCR and personal/internal
+  identifiers were not sent to external search. When official sources were used, separate
+  transcription/OCR support from evidence that conflicts with the video and include timestamp,
+  purpose, finding, checked date, and official links. No H2 section may follow it.
 
 ## Standard Commands
 
@@ -176,15 +197,35 @@ Snapshots necessary for evidence resolution. In strict mode, write `content_inve
 `evidence_ledger.json`, `document_blueprint.json`, `official_sources.json`, `minutes.md`,
 `content_audit.json`, and `content_quality_review.json` in the quality-loop order. The blueprint
 must make the cover document type, evidence metadata, functional H2 roles, primary inventory
-placement, form factors, operational utility, and reader-facing evidence placement explicit.
-Write only the eight model-judged schema-v3 checks, then run:
+placement, form factors, operational utility, reader-facing evidence placement, and a 3-5 core
+image plan explicit when Snapshots add reader value. Never place full-width images adjacently or
+leave the final image as the document's last substantive block. Write the eight model-judged
+schema-v3 checks plus `required_item_checks`; use one targeted second cycle at most, then run:
+
+Use the exact review keys `item_id`, `section_id`, and `dimensions`. When a second cycle is
+needed, keep the non-empty findings, changes, and `target_section_ids` on the first `revised`
+cycle and make the second cycle the clean pass.
 
 ```bash
 python scripts/content_freeze.py "<job-directory>"
 ```
 
 The command fills hashes, reviewed chunk indexes, and document signals deterministically and
-reruns the complete content gate. When translation is required, the launcher then starts one
+reruns the complete content gate. On a density warning it also fixes the first reader-body state in
+`content_density_baseline.json`, excludes evidence/external appendices from repair targets, and
+requires an actual information-character gain in every validator-selected substantive section.
+The recovery requires a minimum gain that closes 80% of the warning deficit, with the required
+minimum bounded to 400-1,800 information characters and at least 120 per target. This bounds only
+the mandatory repair size; it does not impose a maximum on any section or final document. Repairs are additive by default so exact audit/review
+references remain valid; any changed cited sentence requires all affected references in the same patch.
+If the content retry then fails only on stale exact references, allow one bounded review-sidecar-only
+reference repair and final freeze; never change `minutes.md`, and never rerun freeze after a failed patch.
+After freeze, do not patch the large audit/review JSON files directly. Put only named reference
+updates in `content_review_patch.json` and apply them with
+`scripts/apply_content_review_patch.py`; validator-owned bindings, signals, and cycles stay intact.
+The worker does not patch density `review_cycles`; once all required minimum gains pass,
+`content_freeze.py` writes the deterministic revised/pass cycle, targets, and measured changes.
+When translation is required, the launcher then starts one
 low-reasoning, tool-free translation turn from frozen `minutes.md` and validates it with:
 
 ```bash
@@ -194,22 +235,32 @@ python scripts/translation.py "<job-directory>" --verify
 This produces `minutes.translated.md` plus hash-bound `translation_manifest.json`. It performs no
 second content review and never reads STT, OCR, inventory, audit, ledger, or Snapshots. If source
 and target languages already match, this phase is skipped. The launcher then starts delivery.
+The launcher emits a heartbeat after 10 minutes without JSON events and terminates a 15-minute
+silent Codex model/CLI stream with exit code 80, keeping that failure distinct from local STT/OCR.
 
 For `DOCX_ENABLED=true`, the delivery worker receives a compact preloaded contract instead of
-reading the full minutes and Documents skill files. `finalize_docx.py` applies the
-`standard_business_brief` preset and delegates rendering to the newest bundled Documents skill
-`render_docx.py`. The launcher disables Documents plugin injection inside fresh workers only; it
-does not remove the installed renderer used by the deterministic script. Generate a deterministic job-local draft, render into a clean directory, and run
-structural QA with one command:
+reading the full minutes and Documents skill files. `finalize_docx.py` copies the retained
+`assets/minutes-word-template.docx`, fills its cover/TOC/body slots, records its SHA-256, and
+delegates rendering to the newest bundled Documents skill `render_docx.py`. The template contains
+no reference meeting content; it retains only approved geometry, styles, numbering, table palette,
+and footer. Read `references/word-template.md` when maintaining this path. The launcher disables
+Documents plugin injection inside fresh workers only; it does not remove the installed renderer
+used by the deterministic script. Generate a deterministic job-local draft, render into a clean
+directory, and run structural QA with one command:
 
 ```bash
 python scripts/finalize_docx.py prepare "<job-directory>"
 ```
 
-Inspect every latest page PNG at 100%. The source-frozen Markdown and validated final Markdown must
-not change for pagination. Revise
-only blocking layout defects and rerender once with `prepare --reuse-final`; warnings alone do not
-authorize another render. A third render requires an explicit supported `--blocking-defect-code`.
+Inspect every latest page PNG at 100%. This one full render is required because Word pagination,
+tables, and images can change after slot filling; it is verification, not model-driven layout
+reconstruction. The source-frozen Markdown and validated final Markdown must not change for
+pagination. Revise only real blocking layout defects and rerender once with `prepare --reuse-final`.
+`NATURAL_FINAL_PAGE_WHITESPACE` is a nonblocking warning. Never shorten, pad, or reflow complete
+content merely to fill the final page; warnings alone do not authorize another render. Excessive
+interior gaps, adjacent large images, and image placement drift remain blocking. A third render
+requires an explicit supported
+`--blocking-defect-code`.
 The three-render production limit remains. One extra renderer-repair render is allowed only when
 the renderer fingerprint changed and a supported blocking defect is named; it cannot loop on the
 same renderer.
@@ -257,8 +308,9 @@ is a direct child of configured `~/minutes/jobs`, then starts the worker with it
 
 ## DOCX Requirements
 
-Generate the job-local DOCX through `scripts/finalize_docx.py` when `DOCX_ENABLED=true`, use the
-bundled Documents renderer, and apply the compact visual shipping contract. A Codex or strict job without a valid
+Generate the job-local DOCX through `scripts/finalize_docx.py` when `DOCX_ENABLED=true`, fill the
+retained `assets/minutes-word-template.docx`, use the bundled Documents renderer, and apply the
+compact visual shipping contract. A Codex or strict job without a valid
 content freeze, hash-matching `minutes.final.docx`, latest rendered pages, complete
 `visual_review.json`, and passed `docx_qa.json` must not archive.
 
@@ -289,7 +341,8 @@ Do not inspect validator implementations or tests unless a validator actually fa
 bounded error cannot be resolved from this skill. Keep full command output in job-local logs when
 available and return only exit status, hashes, counts, and bounded failure details to the model.
 
-Render every DOCX page and inspect the cover, TOC, tables, and final page. Verify TOC links,
+Render every DOCX page once and inspect the cover, TOC, tables, and final page. Record natural final
+page whitespace as a warning; do not reject or rerender solely for it. Verify TOC links,
 bookmarks, table geometry, final-folder contents, source move semantics, strict audit coverage,
 `content_freeze.json`, an optional `translation_manifest.json`, `docx_qa.json` hashes/status, and
 retained job evidence. Specifically verify
@@ -297,7 +350,7 @@ retained job evidence. Specifically verify
 diarization stage appears in metrics. For Codex mode, verify `fresh_codex_handoff.json` reports
 isolated content and delivery phases, plus translation only when required; no parent conversation
 inheritance; no raw evidence outside content; matching input/Snapshot/final-Markdown hashes; and
-`worker_contract.mode=preloaded_compact`; zero forbidden instruction reads and outputs over 20KB;
+`worker_contract.mode=preloaded_compact`; zero forbidden instruction reads and command/read outputs over 24KB;
 and `state=completed`. A zero Codex exit code without completed
 `status.json` and real archived artifacts is a failure.
 

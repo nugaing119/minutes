@@ -28,6 +28,7 @@ security-reports/
 *.ogg
 *.srt
 *.docx
+!codex/skills/minutes/assets/minutes-word-template.docx
 
 # Credentials and local config
 *.pem

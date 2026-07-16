@@ -13,6 +13,7 @@ if __package__ in {None, ""}:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from scripts.content_freeze import validate_content_freeze
+from scripts.content_quality import TRUST_SECTION_HEADINGS
 from scripts.document_language import language_policy_from_status, normalize_language
 from scripts.utils import now_local, read_json, write_json
 
@@ -41,6 +42,7 @@ NUMERIC_LITERAL_PATTERN = re.compile(r"(?<!\d)\d+(?:[.,]\d+)*(?!\d)")
 OUTPUT_METADATA_PATTERN = re.compile(
     r"(?mi)^\s*-\s*(?:Output language|출력 언어)\s*:\s*(.+?)\s*$"
 )
+H2_HEADING_PATTERN = re.compile(r"(?m)^##[ \t]+(.+?)[ \t]*$")
 
 
 def sha256_file(path: Path) -> str:
@@ -147,6 +149,31 @@ def validate_translation_text(
         issues.append("Korean target contains no Hangul")
     if normalized == "en" and not re.search(r"[A-Za-z]", target):
         issues.append("English target contains no Latin text")
+    source_h2s = H2_HEADING_PATTERN.findall(source)
+    target_h2s = H2_HEADING_PATTERN.findall(target)
+    source_trust_roles = [
+        role
+        for role, headings in TRUST_SECTION_HEADINGS.items()
+        if any(heading in set(headings.values()) for heading in source_h2s)
+    ]
+    if source_trust_roles and normalized in {"ko", "en"}:
+        for role in source_trust_roles:
+            expected_heading = TRUST_SECTION_HEADINGS[role][normalized]
+            if expected_heading not in target_h2s:
+                issues.append(
+                    f"translated Markdown is missing the canonical trust heading: "
+                    f"## {expected_heading}"
+                )
+        if set(source_trust_roles) == {"open_questions", "external_evidence"}:
+            expected_tail = [
+                TRUST_SECTION_HEADINGS["open_questions"][normalized],
+                TRUST_SECTION_HEADINGS["external_evidence"][normalized],
+            ]
+            if target_h2s[-2:] != expected_tail:
+                issues.append(
+                    "translated Markdown must keep the canonical trust headings as "
+                    "the final two H2 sections"
+                )
     if issues:
         raise ValueError("translation validation failed: " + "; ".join(issues))
     return {

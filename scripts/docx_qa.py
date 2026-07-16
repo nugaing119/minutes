@@ -29,46 +29,46 @@ SCHEMA_VERSION = 1
 SELECTED_REVIEW_PRESET = DOCUMENTS_PRESET
 EXPECTED_STYLES = {
     "Normal": {
-        "font": "Calibri",
-        "size_pt": 11.0,
+        "font": "Arial",
+        "size_pt": 9.5,
         "before_pt": 0.0,
-        "after_pt": 6.0,
-        "line_spacing": 1.10,
+        "after_pt": 5.0,
+        "line_spacing": 1.08,
     },
     "Heading 1": {
-        "font": "Calibri",
+        "font": "Arial",
         "size_pt": 16.0,
-        "before_pt": 16.0,
-        "after_pt": 8.0,
+        "before_pt": 20.0,
+        "after_pt": 10.0,
         "line_spacing": None,
     },
     "Heading 2": {
-        "font": "Calibri",
+        "font": "Arial",
         "size_pt": 13.0,
-        "before_pt": 12.0,
-        "after_pt": 6.0,
+        "before_pt": 15.0,
+        "after_pt": 7.0,
         "line_spacing": None,
     },
     "Heading 3": {
-        "font": "Calibri",
-        "size_pt": 12.0,
-        "before_pt": 8.0,
-        "after_pt": 4.0,
+        "font": "Arial",
+        "size_pt": 11.0,
+        "before_pt": 10.0,
+        "after_pt": 5.0,
         "line_spacing": None,
     },
     "List Bullet": {
-        "font": "Calibri",
-        "size_pt": 11.0,
+        "font": "Arial",
+        "size_pt": 9.5,
         "before_pt": None,
-        "after_pt": 8.0,
-        "line_spacing": 1.167,
+        "after_pt": 4.0,
+        "line_spacing": 1.08,
     },
     "List Number": {
-        "font": "Calibri",
-        "size_pt": 11.0,
+        "font": "Arial",
+        "size_pt": 9.5,
         "before_pt": None,
-        "after_pt": 8.0,
-        "line_spacing": 1.167,
+        "after_pt": 4.0,
+        "line_spacing": 1.08,
     },
 }
 
@@ -133,12 +133,12 @@ def _audit_preset(document: Any, issues: list[str]) -> dict[str, Any]:
     expected_page = {
         "width_in": 8.5,
         "height_in": 11.0,
-        "top_margin_in": 1.0,
-        "right_margin_in": 1.0,
-        "bottom_margin_in": 1.0,
-        "left_margin_in": 1.0,
-        "header_distance_in": 0.492,
-        "footer_distance_in": 0.492,
+        "top_margin_in": 0.69,
+        "right_margin_in": 0.69,
+        "bottom_margin_in": 0.69,
+        "left_margin_in": 0.69,
+        "header_distance_in": 0.49,
+        "footer_distance_in": 0.49,
     }
     for key, expected in expected_page.items():
         if abs(page[key] - expected) > 0.005:
@@ -175,10 +175,10 @@ def _audit_preset(document: Any, issues: list[str]) -> dict[str, Any]:
             issues.append(f"{style_name} does not use a real numbering definition")
         left_indent = style.paragraph_format.left_indent
         first_line = style.paragraph_format.first_line_indent
-        if left_indent is None or abs(left_indent.inches - 0.5) > 0.005:
-            issues.append(f"{style_name} text indent does not match 0.5in")
-        if first_line is None or abs(first_line.inches + 0.25) > 0.005:
-            issues.append(f"{style_name} hanging indent does not match 0.25in")
+        if left_indent is None or abs(left_indent.inches - 0.32) > 0.005:
+            issues.append(f"{style_name} text indent does not match 0.32in")
+        if first_line is None or abs(first_line.inches + 0.18) > 0.005:
+            issues.append(f"{style_name} hanging indent does not match 0.18in")
     return {"page": page, "styles": styles}
 
 

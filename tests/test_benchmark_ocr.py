@@ -20,6 +20,7 @@ class BenchmarkOcrTests(unittest.TestCase):
             (snapshots / "snapshot_0001_00-00-00.jpg").write_bytes(b"jpg")
             result = {
                 "frame_interval_seconds": 5,
+                "ffmpeg_threads": 2,
                 "workers": 5,
                 "tesseract_thread_limit": 1,
                 "tesseract_nice": 0,
@@ -51,6 +52,7 @@ class BenchmarkOcrTests(unittest.TestCase):
                 )
 
             self.assertEqual(report["runtime"]["observed_process_nice"], 10)
+            self.assertEqual(report["configuration"]["ffmpeg_threads"], 2)
             self.assertEqual(report["timing"]["cpu_to_wall_ratio"], 2.5)
             self.assertEqual(report["work"]["snapshots"]["count"], 1)
             self.assertEqual(len(report["work"]["snapshots"]["manifest_sha256"]), 64)

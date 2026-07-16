@@ -13,6 +13,7 @@ from scripts.document_language import (
 from scripts.translation import (
     create_translation_manifest,
     resolve_final_markdown,
+    validate_translation_text,
     validate_translation_manifest,
 )
 
@@ -113,6 +114,37 @@ class TranslationManifestTests(unittest.TestCase):
         self.assertEqual(verified["target_language"], "ko")
         self.assertEqual(final_path.name, "minutes.translated.md")
         self.assertEqual(manifest["checks"]["model_review_cycles"], 0)
+
+    def test_translation_requires_canonical_target_trust_headings(self) -> None:
+        source = (
+            SOURCE_MARKDOWN.rstrip()
+            + "\n\n## Items Requiring Further Verification\n\nNone.\n\n"
+            + "## External Evidence Check\n\nNo external check was required.\n"
+        )
+        target = (
+            TARGET_MARKDOWN.rstrip()
+            + "\n\n## 열린 질문\n\n없음.\n\n"
+            + "## 외부 출처 확인\n\n외부 확인이 필요하지 않았다.\n"
+        )
+
+        with self.assertRaisesRegex(ValueError, "canonical trust heading"):
+            validate_translation_text(source, target, target_language="ko")
+
+    def test_translation_accepts_canonical_target_trust_headings(self) -> None:
+        source = (
+            SOURCE_MARKDOWN.rstrip()
+            + "\n\n## Items Requiring Further Verification\n\nNone.\n\n"
+            + "## External Evidence Check\n\nNo external check was required.\n"
+        )
+        target = (
+            TARGET_MARKDOWN.rstrip()
+            + "\n\n## 추가 검증이 필요한 항목\n\n없음.\n\n"
+            + "## 외부 근거 확인\n\n외부 확인이 필요하지 않았다.\n"
+        )
+
+        checks = validate_translation_text(source, target, target_language="ko")
+
+        self.assertTrue(checks["structure_preserved"])
 
     def test_missing_numeric_literal_is_rejected_without_model_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

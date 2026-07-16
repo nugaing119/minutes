@@ -34,15 +34,22 @@ def prepare_quality_rework(
     source_job: Path,
     *,
     jobs_dir: Path,
+    allow_prepared_retry: bool = False,
 ) -> Path:
     jobs_dir = jobs_dir.expanduser().resolve()
     source_job = source_job.expanduser().resolve()
     if source_job.parent != jobs_dir:
         raise ValueError("source job must be a direct child of the configured jobs directory")
     status = read_json(source_job / "status.json")
-    if status.get("status") != "completed":
+    source_status = status.get("status")
+    prepared_retry = allow_prepared_retry and source_status == "awaiting_codex"
+    if source_status != "completed" and not prepared_retry:
         raise ValueError("source job must be completed before quality rework")
-    source_output = _archived_source(status)
+    source_output = (
+        _prepared_source(status, source_job)
+        if prepared_retry
+        else _archived_source(status)
+    )
     if not source_output.is_file():
         raise FileNotFoundError(source_output)
     input_path = source_job / "codex_minutes_input.md"
@@ -110,7 +117,11 @@ def prepare_quality_rework(
             {
                 "schema_version": 1,
                 "created_at": now_local().isoformat(),
-                "purpose": "content_quality_rework_without_preprocessing",
+                "purpose": (
+                    "content_quality_retry_without_preprocessing"
+                    if prepared_retry
+                    else "content_quality_rework_without_preprocessing"
+                ),
                 "source_job": str(source_job),
                 "source_output": str(source_output),
                 "source_media_sha256": _sha256_file(staged_source),
@@ -159,6 +170,23 @@ def _archived_source(status: dict) -> Path:
     return Path(raw).expanduser().resolve()
 
 
+def _prepared_source(status: dict, source_job: Path) -> Path:
+    candidates: list[Path] = []
+    managed = status.get("managed_source")
+    if isinstance(managed, str) and managed.strip():
+        candidates.append(Path(managed).expanduser().resolve())
+    files = status.get("files")
+    if isinstance(files, dict):
+        raw = files.get("source") or files.get("video") or files.get("audio")
+        if isinstance(raw, str) and raw.strip():
+            candidates.append(Path(raw).expanduser().resolve())
+    candidates.extend(sorted(source_job.glob("source.*")))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise ValueError("prepared source job has no staged source media")
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -177,6 +205,11 @@ def main() -> None:
         action="store_true",
         help="Remove inherited result counts from an awaiting quality rework status.",
     )
+    parser.add_argument(
+        "--from-prepared",
+        action="store_true",
+        help="Clone an awaiting prepared job for a clean content retry without STT/OCR.",
+    )
     args = parser.parse_args()
     settings = load_settings()
     if args.sanitize_existing:
@@ -189,6 +222,7 @@ def main() -> None:
     destination = prepare_quality_rework(
         args.source_job,
         jobs_dir=Path(settings.jobs_dir),
+        allow_prepared_retry=args.from_prepared,
     )
     print(destination)
 

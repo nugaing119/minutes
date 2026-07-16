@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from scripts.content_audit import validate_content_artifacts
+from scripts.content_quality import TRUST_APPENDIX_DISCLOSURES
 from scripts.utils import write_json
 
 
@@ -77,6 +78,9 @@ def write_valid_artifacts(job_dir: Path) -> None:
         "The slide and speech differ on availability, so the current policy "
         "requires official confirmation.\n\n"
         "## External Evidence Check\n\n"
+        "- Checked: 2026-07-13\n"
+        f"- Policy: {TRUST_APPENDIX_DISCLOSURES['en'][0]}\n"
+        f"- Privacy: {TRUST_APPENDIX_DISCLOSURES['en'][1]}\n\n"
         "### Evidence conflicting with the video\n\n"
         "The current official schedule differs from the recorded statement. "
         "[Official schedule](https://docs.example.com/version-support)\n",
@@ -211,6 +215,116 @@ class ContentAuditTests(unittest.TestCase):
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["required_items"], 1)
         self.assertEqual(result["official_source_status"], "completed")
+
+    def test_not_applicable_official_check_still_requires_a_visible_final_appendix(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            write_valid_artifacts(job_dir)
+            inventory_path = job_dir / "content_inventory.json"
+            inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+            inventory["items"][0]["official_verification"] = "not_applicable"
+            write_json(inventory_path, inventory)
+            reason = "No unresolved public claim remained after local cross-checking."
+            write_json(
+                job_dir / "official_sources.json",
+                {
+                    "schema_version": 1,
+                    "status": "not_applicable",
+                    "checked_at": "2026-07-16T12:00:00+09:00",
+                    "policy": "official_only",
+                    "appendix_heading": "External Evidence Check",
+                    "reason": reason,
+                    "claims": [],
+                    "privacy": {"raw_transcript_or_ocr_sent": False},
+                },
+            )
+            minutes_path = job_dir / "minutes.md"
+            minutes_path.write_text(
+                minutes_path.read_text(encoding="utf-8").split(
+                    "## External Evidence Check",
+                    1,
+                )[0].rstrip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing the official-evidence appendix"):
+                validate_content_artifacts(
+                    job_dir,
+                    audit_mode="strict",
+                    official_source_verification="auto",
+                )
+
+    def test_not_applicable_official_check_is_disclosed_in_the_document(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            write_valid_artifacts(job_dir)
+            inventory_path = job_dir / "content_inventory.json"
+            inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+            inventory["items"][0]["official_verification"] = "not_applicable"
+            write_json(inventory_path, inventory)
+            reason = "No unresolved public claim remained after local cross-checking."
+            write_json(
+                job_dir / "official_sources.json",
+                {
+                    "schema_version": 1,
+                    "status": "not_applicable",
+                    "checked_at": "2026-07-16T12:00:00+09:00",
+                    "policy": "official_only",
+                    "appendix_heading": "External Evidence Check",
+                    "reason": reason,
+                    "claims": [],
+                    "privacy": {"raw_transcript_or_ocr_sent": False},
+                },
+            )
+            minutes_path = job_dir / "minutes.md"
+            body = minutes_path.read_text(encoding="utf-8").split(
+                "## External Evidence Check",
+                1,
+            )[0].rstrip()
+            minutes_path.write_text(
+                body
+                + "\n\n## External Evidence Check\n\n"
+                + "- Checked: 2026-07-16\n"
+                + f"- Result: {reason}\n"
+                + f"- Policy: {TRUST_APPENDIX_DISCLOSURES['en'][0]}\n"
+                + f"- Privacy: {TRUST_APPENDIX_DISCLOSURES['en'][1]}\n",
+                encoding="utf-8",
+            )
+
+            result = validate_content_artifacts(
+                job_dir,
+                audit_mode="strict",
+                official_source_verification="auto",
+            )
+
+        self.assertEqual(result["official_source_status"], "not_applicable")
+
+    def test_official_check_timestamp_cannot_be_in_the_future(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            write_valid_artifacts(job_dir)
+            official_path = job_dir / "official_sources.json"
+            official = json.loads(official_path.read_text(encoding="utf-8"))
+            official["checked_at"] = "2999-07-16T14:30:00+09:00"
+            write_json(official_path, official)
+            minutes_path = job_dir / "minutes.md"
+            minutes_path.write_text(
+                minutes_path.read_text(encoding="utf-8").replace(
+                    "Checked: 2026-07-13",
+                    "Checked: 2999-07-16",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "checked_at cannot be in the future"):
+                validate_content_artifacts(
+                    job_dir,
+                    audit_mode="strict",
+                    official_source_verification="required",
+                )
 
     def test_strict_audit_fails_when_artifacts_are_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

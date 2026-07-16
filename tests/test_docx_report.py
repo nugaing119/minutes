@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -11,6 +13,7 @@ from docx import Document
 from docx.oxml.ns import qn
 
 from scripts.docx_report import (
+    DEFAULT_WORD_TEMPLATE_PATH,
     DOCUMENTS_PRESET,
     column_widths,
     generate_docx_report,
@@ -175,7 +178,7 @@ class DocxReportTests(unittest.TestCase):
             korean_output = root / "korean.docx"
             korean_markdown.write_text(
                 "# 제품 브리핑\n\n"
-                "문서 유형: 내부 브리핑\n\n"
+                "- 문서 유형: 내부 브리핑\n\n"
                 "## 방향\n\n"
                 "본문\n",
                 encoding="utf-8",
@@ -198,10 +201,11 @@ class DocxReportTests(unittest.TestCase):
         self.assertNotIn("목차", english_text)
         self.assertFalse(any("작성일" in text for text in english_text))
         self.assertIn("목차", korean_text)
-        self.assertIn("기록일: 2026-04-13", korean_text)
-        self.assertFalse(any("작성일" in text for text in korean_text))
+        self.assertIn("내부 브리핑", korean_text)
+        self.assertIn("작성일: 2026-04-13", korean_text)
+        self.assertFalse(any("기록일" in text for text in korean_text))
 
-    def test_standard_business_brief_preset_is_encoded_in_styles_and_page(self) -> None:
+    def test_retained_word_template_is_encoded_in_styles_and_page(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             markdown = root / "analysis.md"
@@ -214,17 +218,41 @@ class DocxReportTests(unittest.TestCase):
             generate_docx_report(markdown, output, saved_date="2026-07-15")
             document = Document(output)
 
-        self.assertEqual(DOCUMENTS_PRESET, "standard_business_brief")
+        self.assertEqual(DOCUMENTS_PRESET, "retained_word_template")
+        self.assertTrue(DEFAULT_WORD_TEMPLATE_PATH.is_file())
         section = document.sections[0]
-        self.assertAlmostEqual(section.top_margin.inches, 1.0, places=3)
-        self.assertAlmostEqual(section.right_margin.inches, 1.0, places=3)
+        self.assertAlmostEqual(section.top_margin.inches, 0.69, places=2)
+        self.assertAlmostEqual(section.right_margin.inches, 0.69, places=2)
         normal = document.styles["Normal"]
-        self.assertEqual(normal.font.name, "Calibri")
-        self.assertEqual(normal.font.size.pt, 11.0)
-        self.assertEqual(normal.paragraph_format.space_after.pt, 6.0)
+        self.assertEqual(normal.font.name, "Arial")
+        self.assertEqual(normal.font.size.pt, 9.5)
+        self.assertEqual(normal.paragraph_format.space_after.pt, 5.0)
         self.assertEqual(document.styles["Heading 1"].font.size.pt, 16.0)
         self.assertEqual(document.styles["Heading 2"].font.size.pt, 13.0)
-        self.assertEqual(document.styles["Heading 3"].font.size.pt, 12.0)
+        self.assertEqual(document.styles["Heading 3"].font.size.pt, 11.0)
+
+    def test_retained_template_contains_no_reference_body_content(self) -> None:
+        template = Document(DEFAULT_WORD_TEMPLATE_PATH)
+
+        self.assertEqual(
+            [paragraph.text for paragraph in template.paragraphs if paragraph.text],
+            [],
+        )
+        self.assertEqual(len(template.tables), 0)
+        self.assertEqual(template.core_properties.subject, "heatwave-reference-v1")
+
+    def test_retained_template_metadata_hash_matches_asset(self) -> None:
+        metadata_path = DEFAULT_WORD_TEMPLATE_PATH.with_suffix(".json")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        template_hash = hashlib.sha256(DEFAULT_WORD_TEMPLATE_PATH.read_bytes()).hexdigest()
+
+        self.assertEqual(metadata["template_id"], "heatwave-reference-v1")
+        self.assertEqual(metadata["template"]["sha256"], template_hash)
+        self.assertFalse(metadata["template"]["contains_reference_content"])
+        self.assertEqual(
+            metadata["reference"]["sha256"],
+            "316ca5d2c58df5f53162c8bab7f363f36366cb6e366c94e9f748113f93bbf2fe",
+        )
 
     def test_bold_blockquote_and_ordered_list_do_not_leak_markdown_markers(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

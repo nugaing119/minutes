@@ -2,6 +2,10 @@
 
 Use this reference when modifying or validating `scripts/docx_report.py`.
 
+The generator starts from `../assets/minutes-word-template.docx`; it does not reconstruct page
+geometry, styles, numbering, or the footer for each job. See `word-template.md` for the retained
+components and slot contract. `docx_finalize_manifest.json` records the exact template SHA-256.
+
 ## Internal TOC Links
 
 A clickable static TOC requires both sides:
@@ -91,6 +95,10 @@ pdftoppm -png /private/tmp/minutes-docx-render/file.pdf \
 
 Inspect every rendered page with `view_image`, including the cover, TOC, all tables, and final
 page. Reject clipping/overlap, missing glyph or content, a blank interior page, broken navigation,
-an unreadable table, literal task-list markers, or an orphan heading/split row. Treat a short final
-page, whitespace on one TOC page, intentional section whitespace, and mild readable wrapping as
-nonblocking warnings. Warnings alone do not authorize content changes or another render.
+an unreadable table, literal task-list markers, an orphan heading/split row, excessive layout gaps,
+adjacent large images, or image placement drift. `finalize_docx.py` still measures the last page's
+content depth and active ink-row coverage, but a naturally short final page is recorded as
+`NATURAL_FINAL_PAGE_WHITESPACE`, not a defect. Do not add filler, remove complete content, or reflow
+the document merely to change that measurement. Treat it together with whitespace on one TOC page,
+intentional section whitespace, and mild readable wrapping as nonblocking warnings. Warnings alone
+do not authorize content changes or another render.

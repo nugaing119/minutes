@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -18,7 +19,7 @@ from scripts.utils import now_local, read_json, write_json
 
 SCHEMA_VERSION = 1
 FREEZE_NAME = "content_freeze.json"
-MAX_CLI_ERROR_CHARS = 2_000
+MAX_CLI_ERROR_CHARS = 12_000
 CONTENT_ARTIFACT_NAMES = (
     "minutes.md",
     "content_inventory.json",
@@ -27,6 +28,7 @@ CONTENT_ARTIFACT_NAMES = (
     "official_sources.json",
     "content_audit.json",
     "content_quality_review.json",
+    "content_density_baseline.json",
     "evidence_chunks.json",
 )
 
@@ -88,10 +90,36 @@ def _bounded_error(value: object) -> str:
     return compact[: MAX_CLI_ERROR_CHARS - 1] + "…"
 
 
+def _normalize_official_checked_at(job_dir: Path) -> bool:
+    """Clamp a same-day future model timestamp to the deterministic freeze clock."""
+    official_path = job_dir / "official_sources.json"
+    if not official_path.is_file():
+        return False
+    official = read_json(official_path)
+    checked_at = official.get("checked_at")
+    if not isinstance(checked_at, str) or not checked_at.strip():
+        return False
+    try:
+        checked_datetime = datetime.fromisoformat(
+            checked_at.replace("Z", "+00:00")
+        )
+    except ValueError:
+        return False
+    if checked_datetime.tzinfo is None or checked_datetime.utcoffset() is None:
+        return False
+    current = now_local().astimezone(checked_datetime.tzinfo)
+    if checked_datetime <= current or checked_datetime.date() != current.date():
+        return False
+    official["checked_at"] = current.isoformat()
+    write_json(official_path, official)
+    return True
+
+
 def create_content_freeze(job_dir: Path) -> dict[str, Any]:
     job_dir = job_dir.expanduser().resolve()
     if not job_dir.is_dir():
         raise FileNotFoundError(job_dir)
+    _normalize_official_checked_at(job_dir)
     finalize_compact_review(job_dir)
     status = read_json(job_dir / "status.json")
     policy = _job_policy(status)

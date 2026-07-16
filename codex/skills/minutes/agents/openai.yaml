@@ -1,6 +1,6 @@
 interface:
   display_name: "Local Media Documentation"
   short_description: "Local STT, OCR, and evidence-based documents"
-  default_prompt: "Use $minutes to process local media, freeze source-language content once, add one low-reasoning translation-only turn only when the requested language differs, then create and verify the DOCX in a separate delivery phase."
+  default_prompt: "Use $minutes to process local media with the configured low-heat OCR profile, audit required-item depth without a document-length cap, plan only core visual evidence, freeze source-language content after at most one targeted section repair, translate once only when needed, then fill the retained Word template and verify every DOCX page once; natural final-page whitespace is nonblocking."
 policy:
   allow_implicit_invocation: false

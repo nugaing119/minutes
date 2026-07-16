@@ -87,7 +87,7 @@ class DocxQaTests(unittest.TestCase):
             )
 
         self.assertEqual(qa["status"], "passed")
-        self.assertEqual(qa["documents_preset"], "standard_business_brief")
+        self.assertEqual(qa["documents_preset"], "retained_word_template")
         self.assertTrue(qa["structural"]["passed"])
         self.assertEqual(qa["render"]["page_count"], 1)
         self.assertEqual(verified["final_docx"]["sha256"], qa["final_docx"]["sha256"])

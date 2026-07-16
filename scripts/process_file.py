@@ -120,8 +120,13 @@ def _process_file(media_path: Path, settings: Settings) -> Path:
         "qos": getattr(settings, "process_qos", "utility"),
         "nice": getattr(settings, "process_nice", 10),
         "single_job": True,
-        "ocr_workers": getattr(settings, "ocr_workers", 5),
-        "ocr_ffmpeg_threads": getattr(settings, "ocr_ffmpeg_threads", 4),
+        "ocr_workers": getattr(settings, "ocr_workers", 3),
+        "ocr_ffmpeg_threads": getattr(settings, "ocr_ffmpeg_threads", 2),
+        "ocr_prestart_cooldown_seconds": getattr(
+            settings,
+            "ocr_prestart_cooldown_seconds",
+            0.0,
+        ),
         "ocr_tesseract_thread_limit": getattr(
             settings,
             "ocr_tesseract_thread_limit",
@@ -314,6 +319,13 @@ def _process_file(media_path: Path, settings: Settings) -> Path:
                 "audio_wav",
                 _remove_intermediate_file(audio_path),
             )
+
+        ocr_prestart_cooldown_seconds = float(
+            getattr(settings, "ocr_prestart_cooldown_seconds", 0.0)
+        )
+        if has_video and ocr_prestart_cooldown_seconds > 0:
+            status("pre_ocr_cooldown")
+            time.sleep(ocr_prestart_cooldown_seconds)
 
         status("ocr")
         screen_text = ""

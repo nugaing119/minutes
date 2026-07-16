@@ -21,9 +21,11 @@ python3 scripts/run_codex.py
 항상 `$minutes`를 명시한 요청에서만 활성화된다.
 
 `$minutes`는 로컬 ffmpeg·MLX Whisper·OCR 전처리와 근거·내용 감사를 담당한다. 최종 Word는
-`finalize_docx.py`가 Codex에 번들된 Documents renderer를 호출하고 delivery 세션이 모든 페이지를
-검증한다. 매 작업마다 39KB짜리 Documents `SKILL.md`를 다시 읽지는 않는다. 이 저장소에서는
-`minutes` skill만 복사하며 Documents renderer가 없는 Codex 설치는 먼저 업데이트해야 한다.
+`codex/skills/minutes/assets/minutes-word-template.docx`를 복사해 표지·목차·본문 슬롯만 채우고,
+`finalize_docx.py`가 Codex에 번들된 Documents renderer를 호출해 delivery 세션이 모든 페이지를
+검증한다. 매 작업마다 스타일과 레이아웃을 새로 설계하거나 39KB짜리 Documents `SKILL.md`를
+다시 읽지 않는다. 이 저장소에서는 `minutes` skill만 복사하며 Documents renderer가 없는 Codex
+설치는 먼저 업데이트해야 한다.
 
 `run_codex.py`는 현재 shell 환경변수, `.env`, 기본값 순서로 `MINUTES_HOME`과 `RECORDINGS_INBOX`를 해석하고 두 경로를 Codex `--add-dir`에 전달한다. 사용자 홈 경로를 저장소에 하드코딩하지 않으며, 폴더를 옮기면 `.env` 값만 변경하면 된다. 실행된 Codex에서 `$minutes`로 영상 또는 녹음 파일 경로를 지정한다.
 
@@ -81,10 +83,19 @@ LLM_PROVIDER=codex python scripts/process_file.py "~/remind/회의녹음.m4a"
 실행 전 계약만 확인하려면 `--dry-run`을 붙인다. 이 출력은 프롬프트·근거 본문을 표시하지 않고
 바이트·SHA-256·단계·명령 요약만 8KB 이하로 출력한다.
 
-콘텐츠 세션은 schema-v3의 주관적 품질 항목만 작성한다. 해시·청크 집합·문서 신호는
-`content_freeze.py`가 계산한다. delivery 세션은 `finalize_docx.py` 한 명령으로 생성·렌더·구조
-QA를 수행하고, 전 페이지 확인 뒤 차단 결함이 있을 때만 기본 1회 수정·재렌더링한다. 짧은
-마지막 페이지나 단일 목차 페이지의 여백 같은 비차단 경고만으로는 재작성하지 않는다.
+콘텐츠 세션은 schema-v3의 주관적 품질 항목과 필수 근거별
+`core facts → 조건·예외 → 위험·제한 → 영향 → 실행·결정` 검사를 작성한다. 해시·청크 집합·문서
+신호는 `content_freeze.py`가 계산한다. 긴 영상에 비해 본문 정보 밀도가 낮으면
+`LOW_INFORMATION_DENSITY` 경고로 실패 섹션만 1회 보강하며, 글자 수를 맞추는 전체 재작성은 하지
+않는다. 문서·섹션 글자 수에는 상한을 두지 않고, 품질 검사는 필요한 최소 충실도만 요구한다.
+화면 근거를 본문에 쓸 때는 독자 가치가 있는 핵심 이미지 3-5개를 먼저 계획하고 연속
+대형 이미지, H2당 2개 초과, 문서 끝 이미지 배치를 동결 전에 차단한다.
+
+delivery 세션은 `finalize_docx.py` 한 명령으로 보존된 Word 템플릿을 채우고 최초 전 페이지
+렌더·구조 QA를 수행한다. 전 페이지 확인 뒤 실제 차단 결함이 있을 때만 기본 1회 수정·재렌더링한다.
+마지막 페이지의 자연스러운 여백은 `NATURAL_FINAL_PAGE_WHITESPACE` 비차단 경고로만 기록하며,
+이를 채우려고 본문을 줄이거나 늘리거나 재배치하지 않는다. 전 페이지 최초 렌더 1회는 Word의
+실제 페이지 나눔·표·이미지 깨짐을 확인하기 위해 유지한다.
 
 일반 실행은 현재 Codex UI 추론 설정과 무관하게 `high`를 기본으로 사용한다. 비교가 필요할
 때만 `--reasoning-effort xhigh` 또는 `max`를 명시한다.
@@ -100,7 +111,7 @@ Markdown·blueprint·Word 렌더만 읽는다. delivery 재시도는 유효한 f
 manifest의 `start_line`/`end_line`은 분할 전 원본 좌표이며 part 내부 범위가 아니다. worker는 각
 part 전체를 한 명령으로 읽어야 하며 같은 part 경로가 두 번째 명령에 나타나면 즉시 실패한다.
 compact prompt에는 ledger·inventory·blueprint·audit·quality-review의 정확한 enum과 필드를 넣고,
-절대 `.venv/bin/python` 경로로 freeze를 한 번 실행한다. content는 50회, delivery는 25회 이하의
+절대 `.venv/bin/python` 경로로 freeze를 한 번 실행한다. content는 50회, delivery는 18회 이하의
 도구 왕복을 비용 목표로 기록하되 근거 감사나 전 페이지 QA를 생략하는 품질 상한으로 사용하지 않는다.
 `fresh_codex_handoff.json`에는 핵심 입력 파일
 해시와 Snapshot/raw-frame 디렉터리의 개수·총 바이트·결합 manifest SHA-256,
@@ -174,10 +185,11 @@ AUDIO_CPU_LIMIT_FALLBACK_BURST_CORES=2.5
 OCR_ENABLED=true
 OCR_FRAME_INTERVAL_SECONDS=5
 OCR_LANGUAGES=auto
-OCR_FFMPEG_THREADS=4
-OCR_WORKERS=5
+OCR_FFMPEG_THREADS=2
+OCR_WORKERS=3
 OCR_TESSERACT_THREAD_LIMIT=1
 OCR_TESSERACT_NICE=0
+OCR_PRESTART_COOLDOWN_SECONDS=20
 OCR_FRAME_PAUSE_SECONDS=0
 OCR_VISUAL_DEDUPE_ENABLED=true
 OCR_VISUAL_DEDUPE_IGNORE_BOTTOM_RATIO=0.18
@@ -231,9 +243,9 @@ OFFICIAL_SOURCE_VERIFICATION=auto
 
 원문이 한 context에 들어가지 않을 정도로 길면 시간 구간별로 읽어 하나의 누적 inventory에 항목을 추가한다. 구간별 서술 요약을 만든 뒤 다시 요약하는 방식은 사용하지 않는다. context 한계는 읽기 순서만 나누며 최종 문서의 길이나 필수 내용 보존 범위를 줄이지 않는다.
 
-`OFFICIAL_SOURCE_VERIFICATION=auto`는 먼저 음성 문맥·시간별 STT·OCR·Snapshot을 교차 확인하고, 표현·고유명사·버전 또는 의미가 여전히 모호하거나 충돌할 때만 최신 공식 문서·공식 release note·service announcement·표준 원문·upstream 보안 권고를 조사한다. 공식 문서는 전사를 보강할 수 있지만 명확한 영상 발언을 바꾸지 않는다.
+`OFFICIAL_SOURCE_VERIFICATION=auto`는 먼저 음성 문맥·시간별 STT·OCR·Snapshot을 교차 확인한다. 그래도 모호하거나 충돌하는 내용과 외부에서 확인 가능한 제품 지원·버전·출시·EOL·정책·보안·API 주장이 미해결이면 최신 공식 문서·공식 release note·service announcement·표준 원문·upstream 보안 권고를 조사한다. 발표자 설명이나 추정이라는 이유만으로 확인을 생략하지 않고 해당 qualifier를 보존한다. 공식 문서는 전사를 보강할 수 있지만 명확한 영상 발언을 바꾸지 않는다. 사내 결정과 POC 측정값처럼 공개 권위 근거가 없는 항목은 로컬 추가 검증 대상으로 남긴다.
 
-공식 문서를 사용한 경우 최종 문서 맨 아래 `외부 근거 확인` 섹션을 만들고 `전사·OCR 보강 근거`와 `영상 내용과 상충하는 근거`를 구분한다. 영상 내용과 timestamp, 조사 목적, 공식 확인 결과, 차이 또는 보강 표현, 확인일과 링크를 남기며 그 뒤에는 다른 H2 섹션을 두지 않는다. 웹 검색에는 공개 제품명·버전·일반화한 정책 검색어만 사용하고 STT/OCR 원문, 고객명, 참석자명, 내부 식별자와 비밀정보를 보내지 않는다.
+공식 확인 모드가 켜진 최종 문서는 마지막 두 H2를 `추가 검증이 필요한 항목`, `외부 근거 확인` 순서로 항상 둔다. 앞의 주제 수에 따라 Word 번호만 자동으로 이어지므로 6·7 같은 번호를 제목에 고정하지 않는다. 미해결 항목이나 외부 확인 대상이 없어도 섹션을 삭제하지 않고 판단 사유와 확인일을 표시한다. `외부 근거 확인`에는 영상 우선 원칙과 원문 STT/OCR·개인·내부 식별정보를 외부 검색에 전송하지 않았다는 문장을 남긴다. 공식 문서를 사용했다면 `전사·OCR 보강 근거`와 `영상 내용과 상충하는 근거`를 구분하고 영상 내용과 timestamp, 조사 목적, 공식 확인 결과, 차이 또는 보강 표현, 확인일과 링크를 기록한다. 그 뒤에는 다른 H2를 두지 않는다.
 
 전사 단계는 `ffmpeg`로 16kHz mono PCM을 한 번 추출해 메모리에서
 `mlx-whisper`에 전달한다. `AUDIO_FFMPEG_THREADS=1`은 입력 디코더와 출력 PCM
@@ -349,10 +361,13 @@ LLM_PROVIDER=codex python scripts/process_file.py ~/remind/meeting_video.mp4
 `minutes.md`만 받고 도구를 사용하지 않으며, 결과는 `translation_manifest.json`의 구조·보호값·
 SHA-256 검사를 통과해야 한다. 언어가 같으면 번역 단계와 비용은 완전히 생략된다.
 
-content와 delivery worker에는 필요한 품질 규칙을 8KB 미만의 compact prompt로 미리 넣는다.
-worker가 전체 `SKILL.md`나 reference를 다시 읽는 것은 금지된다. command output과 file-change
-diff를 모두 계측하며, 단일 tool output이 20KB를 넘거나 금지된 지침 파일을 열면 해당 phase를
-즉시 종료한다. 20KB는 내용을 잘라 계속하는 상한이 아니라 저품질 산출물을 막는 실패형 상한이다.
+content와 delivery worker에는 필요한 품질 규칙을 9KB 미만의 compact prompt로 미리 넣는다.
+worker가 전체 `SKILL.md`나 reference를 다시 읽는 것은 금지된다. command/read output은 계측하며,
+단일 결과가 24KB를 넘거나 금지된 지침 파일을 열면 해당 phase를 즉시 종료한다. file-change diff는
+별도 artifact-change 지표로만 계측하고 이 상한으로 문서 크기를 제한하거나 작업을 종료하지 않는다.
+24KB는 61KB급 콘솔 출력을 막는 실패형 상한이지 최종 Markdown/DOCX의 글자 수나 파일 크기 상한이 아니다.
+JSON 이벤트가 10분 동안 없으면 heartbeat 경고를 내고, 15분 무응답이면 exit code 80으로 phase를
+종료한다. 이는 STT/OCR 정지가 아니라 Codex 모델·CLI 스트림 정지를 구분하고 무한 대기를 막는다.
 중복 evidence part 읽기도 즉시 종료한다. 정상 완료한 `fresh_codex_handoff.json`은
 `worker_contract_passed=true`, oversized output 0회, forbidden instruction read 0회,
 duplicate evidence chunk read 0회를 기록한다.
@@ -375,9 +390,10 @@ job 전체를 삭제할 때만 함께 정리한다. 최종 output에는 선별 S
 `OCR_WORKERS`는 서로 다른 프레임을 동시에 처리하는 Tesseract 프로세스 수다. 각
 프로세스는 `OCR_TESSERACT_THREAD_LIMIT=1`을 유지하므로 내부 스레드를 무작정 늘리는
 설정과 다르다. 병렬 작업이 끝나도 결과는 타임스탬프 순서로 다시 적용하며 기존 화면·텍스트
-중복 제거와 snapshot 번호 순서를 보존한다. 검증된 기본 프로필은 5개 worker를 사용한다.
-부하가 큰 장비에서는 `.env`에서 값을 낮춘다. 스킬과
-런타임은 CPU 사용률을 보고 worker 수를 자동 증감하지 않는다.
+중복 제거와 snapshot 번호 순서를 보존한다. 검증된 저발열 기본 프로필은 3개 worker와
+FFmpeg 2 threads를 사용한다. STT·음성 검증 직후에는
+`OCR_PRESTART_COOLDOWN_SECONDS=20`만큼 쉬어 GPU/Metal 부하와 OCR CPU 부하가 연속으로
+누적되지 않게 한다. 스킬과 런타임은 CPU 사용률을 보고 값을 자동 증감하지 않는다.
 
 CPU 부하는 전체 작업의 `taskpolicy` Utility QoS·`nice`·단일 작업 잠금과,
 ffmpeg/Tesseract의 스레드 및 duty-cycle 제한으로 제어한다.
@@ -398,24 +414,32 @@ OCR_FRAME_EXTRACT_CPU_LIMIT_FALLBACK_BURST_CORES=1.5
 OCR_SIGNATURE_CPU_LIMIT_PERCENT=0
 OCR_TESSERACT_CPU_LIMIT_PERCENT=0
 OCR_FRAME_INTERVAL_SECONDS=5
-OCR_FFMPEG_THREADS=4
-OCR_WORKERS=5
+OCR_FFMPEG_THREADS=2
+OCR_WORKERS=3
 OCR_TESSERACT_THREAD_LIMIT=1
 OCR_TESSERACT_NICE=0
+OCR_PRESTART_COOLDOWN_SECONDS=20
 OCR_FRAME_PAUSE_SECONDS=0
 OCR_MAX_SNAPSHOT_GAP_SECONDS=120
 OCR_VISUAL_ONLY_MIN_MEAN_DELTA=12.0
 ```
 
-`OCR_FFMPEG_THREADS=4`는 프레임 추출 디코더가 한 코어에 고정되지 않도록 하는
-검증된 기본값이다. 동일 영상 앞 10분·5초 간격 JPEG 120장 추출 실측에서 1 thread
-16.77초 대비 4 threads 6.34초로 2.64배 빨랐다. `OCR_WORKERS=5`는 현재 11-core M3 Pro에서
-확인한 처리량 설정이다. 다른 Mac에서는 같은 값으로 시작하되 부하가 크면 별도로 측정한 뒤
-`.env`에서 낮춘다.
+과거 처리량 실측에서는 동일 영상 앞 10분·5초 간격 JPEG 120장 추출이 1 thread
+16.77초, 4 threads 6.34초였고, 46분 32.6초 영상에서 5 workers는
+81.775초·평균 CPU 388.8%, 4 workers는 82.115초·평균 CPU 341.7%였다. 이 값은
+처리량 프로필의 참고치이며 현재 기본값은 아니다.
+
+2026-07-16의 30분 49초 영상 A/B에서 4 workers·FFmpeg 4 threads는 OCR wall
+104.08초·평균 CPU 346.0%·CPU 360.13초였고, 3 workers·FFmpeg 2 threads는
+115.15초·평균 CPU 215.3%·CPU 247.86초였다. 처리 시간은 11.07초 늘었지만 평균 CPU는
+37.8%, CPU time은 31.2% 줄었다. 두 실행 모두 370프레임에서 Snapshot 57개와 동일한
+타임스탬프를 선택했다. 52장은 byte-identical이고 JPEG 재인코딩 차이가 난 5장도 PSNR
+45.95~49.84dB로 내용 손실이 없어서 이 3×2 프로필을 기본값으로 채택한다.
 `OCR_TESSERACT_THREAD_LIMIT=1`은 각 Tesseract 프로세스의 OpenMP 스레드 사용을 제한한다.
 전체 job이 이미 `PROCESS_NICE=10`으로 실행되므로 `OCR_TESSERACT_NICE=0`은 자식에게 같은
 우선순위를 상속하고 nice가 20으로 중복 누적되는 문제를 막는다. `OCR_FRAME_PAUSE_SECONDS`는
-프레임 OCR 사이에 대기 시간을 넣어 처리 속도 대신 순간 CPU 부하를 낮춘다.
+정렬된 결과 적용 사이의 선택적 지연이며 이미 끝난 Tesseract의 CPU 피크를 낮추는 장치는
+아니다. 발열 제어는 3×2 병렬도와 OCR 전 냉각 구간을 우선 사용한다.
 
 동일 영상·187프레임 A/B에서 프레임 추출 cap 80은 101.74초, cap 0은 50.72초였고
 두 실행의 프레임은 byte-identical이었다. Tesseract는 고정 크기 batch 대신 최대
@@ -423,14 +447,14 @@ OCR_VISUAL_ONLY_MIN_MEAN_DELTA=12.0
 `process_metrics.json`, `ocr_benchmark.json`에는 단계별 wall/CPU time, 호출 수, 평균·최대
 동시 worker, queue 대기와 선택 결과 해시가 기록된다.
 
-2026-07-15에 31분 12.57초 대상 영상을 현재 로컬 프로필로 재측정한 결과는 다음과 같다.
+2026-07-15에 31분 12.57초 대상 영상을 당시 5-worker 로컬 프로필로 재측정한 결과는 다음과 같다.
 
 - 종전: 10초 간격 187프레임, Snapshot 22장, OCR wall 134.96초, CPU 124.41초,
   최대 Snapshot 공백 480초
-- 현재: 5초 간격 375프레임, Snapshot 42장, OCR wall 65.917초, CPU 117.54초,
+- 개선 당시: 5초 간격 375프레임, Snapshot 42장, OCR wall 65.917초, CPU 117.54초,
   최대 Snapshot 공백 120초
 - 변화: wall 51.2% 단축, CPU 5.5% 감소, 분석 프레임 약 2배, 선별 근거 90.9% 증가
-- 현재 단계별 wall: 프레임 추출 50.309초, 화면 서명 3.941초, Tesseract 11.537초,
+- 해당 실행의 단계별 wall: 프레임 추출 50.309초, 화면 서명 3.941초, Tesseract 11.537초,
   결과 적용 0.022초
 - Tesseract 후보 42개, 최대 active worker 5, 평균 active worker 4.549,
   process 단위 peak RSS 약 75.1 MiB

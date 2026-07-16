@@ -40,6 +40,13 @@ def _float_from_env(name: str, default: float) -> float:
     return float(raw)
 
 
+def _nonnegative_float_from_env(name: str, default: float) -> float:
+    value = _float_from_env(name, default)
+    if value < 0:
+        raise ValueError(f"{name} must be greater than or equal to 0")
+    return value
+
+
 def _bool_from_env(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -96,6 +103,7 @@ class Settings:
     ocr_workers: int
     ocr_tesseract_thread_limit: int
     ocr_tesseract_nice: int
+    ocr_prestart_cooldown_seconds: float
     ocr_frame_pause_seconds: float
     ocr_visual_dedupe_enabled: bool
     ocr_visual_dedupe_ignore_bottom_ratio: float
@@ -229,10 +237,14 @@ def load_settings() -> Settings:
         ocr_frame_interval_seconds=_int_from_env("OCR_FRAME_INTERVAL_SECONDS", 5),
         ocr_languages=os.environ.get("OCR_LANGUAGES", "auto").strip().lower(),
         ocr_max_context_chars=_int_from_env("OCR_MAX_CONTEXT_CHARS", 12_000),
-        ocr_ffmpeg_threads=_int_from_env("OCR_FFMPEG_THREADS", 4),
-        ocr_workers=_bounded_int_from_env("OCR_WORKERS", 5, 1, 16),
+        ocr_ffmpeg_threads=_bounded_int_from_env("OCR_FFMPEG_THREADS", 2, 1, 16),
+        ocr_workers=_bounded_int_from_env("OCR_WORKERS", 3, 1, 16),
         ocr_tesseract_thread_limit=_int_from_env("OCR_TESSERACT_THREAD_LIMIT", 1),
         ocr_tesseract_nice=_int_from_env("OCR_TESSERACT_NICE", 0),
+        ocr_prestart_cooldown_seconds=_nonnegative_float_from_env(
+            "OCR_PRESTART_COOLDOWN_SECONDS",
+            20.0,
+        ),
         ocr_frame_pause_seconds=_float_from_env("OCR_FRAME_PAUSE_SECONDS", 0.0),
         ocr_visual_dedupe_enabled=_bool_from_env("OCR_VISUAL_DEDUPE_ENABLED", True),
         ocr_visual_dedupe_ignore_bottom_ratio=_float_from_env(

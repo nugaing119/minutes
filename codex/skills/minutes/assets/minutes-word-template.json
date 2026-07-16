@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "template_id": "heatwave-reference-v1",
+  "reference": {
+    "name": "2026-02-12_MySQL-HeatWave-8.0-EOL과-AutoML·GenAI-동시성-아키텍처.docx",
+    "sha256": "316ca5d2c58df5f53162c8bab7f363f36366cb6e366c94e9f748113f93bbf2fe",
+    "section_count": 1,
+    "geometry": {
+      "page_width_in": 8.5,
+      "page_height_in": 11.0,
+      "top_margin_in": 0.69,
+      "right_margin_in": 0.69,
+      "bottom_margin_in": 0.69,
+      "left_margin_in": 0.69
+    }
+  },
+  "template": {
+    "name": "minutes-word-template.docx",
+    "sha256": "644968bb774d6854dd1ccf47784114009277c0954c10dfb86adce23e9d67c35d",
+    "editable_slots": [
+      "cover_title",
+      "cover_document_type",
+      "cover_recording_date",
+      "static_toc",
+      "document_body"
+    ],
+    "retained_components": [
+      "page_geometry",
+      "style_system",
+      "numbering",
+      "footer_page_number",
+      "table_palette"
+    ],
+    "contains_reference_content": false
+  }
+}

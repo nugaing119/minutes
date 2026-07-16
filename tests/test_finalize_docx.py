@@ -4,13 +4,20 @@ import json
 import struct
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from docx import Document
 
-from scripts.finalize_docx import approve_docx, prepare_docx
+from scripts.finalize_docx import (
+    BLOCKING_DEFECT_CODES,
+    NONBLOCKING_WARNING_CODES,
+    approve_docx,
+    prepare_docx,
+    render_layout_summary,
+)
 
 
 def write_png_header(path: Path, width: int = 1275, height: int = 1650) -> None:
@@ -19,6 +26,41 @@ def write_png_header(path: Path, width: int = 1275, height: int = 1650) -> None:
         + struct.pack(">I", 13)
         + b"IHDR"
         + struct.pack(">II", width, height)
+    )
+
+
+def write_rgb_png(
+    path: Path,
+    *,
+    width: int = 120,
+    height: int = 200,
+    ink_end: int = 160,
+    ink_ranges: tuple[tuple[int, int], ...] | None = None,
+) -> None:
+    ranges = ink_ranges or ((20, ink_end),)
+    rows = []
+    for y in range(height):
+        row = bytearray([0])
+        for x in range(width):
+            black = 16 <= x < width - 16 and any(
+                start <= y < end for start, end in ranges
+            )
+            row.extend((0, 0, 0) if black else (255, 255, 255))
+        rows.append(bytes(row))
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        )
+
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"".join(rows)))
+        + chunk(b"IEND", b"")
     )
 
 
@@ -43,7 +85,24 @@ class FinalizeDocxTests(unittest.TestCase):
     @staticmethod
     def _renderer(command: list[str], **_kwargs: object) -> SimpleNamespace:
         output_dir = Path(command[command.index("--output_dir") + 1])
+        write_rgb_png(output_dir / "page-1.png", ink_end=170)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    @staticmethod
+    def _invalid_png_renderer(
+        command: list[str], **_kwargs: object
+    ) -> SimpleNamespace:
+        output_dir = Path(command[command.index("--output_dir") + 1])
         write_png_header(output_dir / "page-1.png")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    @staticmethod
+    def _short_final_page_renderer(
+        command: list[str], **_kwargs: object
+    ) -> SimpleNamespace:
+        output_dir = Path(command[command.index("--output_dir") + 1])
+        write_rgb_png(output_dir / "page-1.png", ink_end=170)
+        write_rgb_png(output_dir / "page-2.png", ink_end=48)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     def test_prepare_and_approve_preserve_frozen_markdown(self) -> None:
@@ -63,9 +122,7 @@ class FinalizeDocxTests(unittest.TestCase):
                             "status": "passed",
                             "inspected_pages": [1],
                             "blocking_defects": [],
-                            "warnings": [
-                                {"code": "SHORT_FINAL_PAGE", "page": 1}
-                            ],
+                            "warnings": [],
                         }
                     ),
                     encoding="utf-8",
@@ -78,6 +135,72 @@ class FinalizeDocxTests(unittest.TestCase):
         self.assertEqual(approved["status"], "passed")
         self.assertEqual(final_markdown, original_markdown)
         self.assertTrue(qa_exists)
+        self.assertTrue(Path(prepared["word_template"]["path"]).is_file())
+
+    def test_natural_final_page_whitespace_is_a_nonblocking_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job = self._job(Path(temp_dir))
+            freeze = {"status": "frozen", "content_sha256": "a" * 64}
+            with patch(
+                "scripts.finalize_docx.validate_content_freeze",
+                return_value=freeze,
+            ):
+                prepared = prepare_docx(
+                    job,
+                    runner=self._short_final_page_renderer,
+                )
+                (job / "visual_review.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "status": "passed",
+                            "inspected_pages": [1, 2],
+                            "blocking_defects": [],
+                            "warnings": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                approved = approve_docx(job)
+
+        self.assertEqual(approved["status"], "passed")
+        self.assertNotIn("SHORT_FINAL_PAGE", BLOCKING_DEFECT_CODES)
+        self.assertIn("NATURAL_FINAL_PAGE_WHITESPACE", NONBLOCKING_WARNING_CODES)
+        self.assertEqual(prepared["render_layout"]["blocking_defects"], [])
+        self.assertEqual(
+            prepared["render_layout"]["warnings"][0]["code"],
+            "NATURAL_FINAL_PAGE_WHITESPACE",
+        )
+
+    def test_sparse_final_page_is_measured_without_forcing_reflow(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            render_dir = Path(temp_dir)
+            write_rgb_png(render_dir / "page-1.png", ink_end=170)
+            write_rgb_png(
+                render_dir / "page-2.png",
+                ink_ranges=((20, 46), (70, 74)),
+            )
+
+            summary = render_layout_summary(render_dir)
+
+        self.assertGreater(summary["last_page"]["content_end_ratio"], 0.30)
+        self.assertLess(summary["last_page"]["active_row_ratio"], 0.20)
+        self.assertEqual(summary["blocking_defects"], [])
+        self.assertEqual(
+            summary["warnings"][0]["code"],
+            "NATURAL_FINAL_PAGE_WHITESPACE",
+        )
+
+    def test_prepare_fails_closed_when_layout_analysis_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job = self._job(Path(temp_dir))
+            freeze = {"status": "frozen", "content_sha256": "a" * 64}
+            with patch(
+                "scripts.finalize_docx.validate_content_freeze",
+                return_value=freeze,
+            ):
+                with self.assertRaisesRegex(ValueError, "layout occupancy analysis"):
+                    prepare_docx(job, runner=self._invalid_png_renderer)
 
     def test_prepare_uses_validated_translated_markdown_for_word(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

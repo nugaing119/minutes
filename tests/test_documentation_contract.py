@@ -10,6 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 class DocumentationContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.agents_guidance = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
         cls.plan = (REPO_ROOT / "PLAN.md").read_text(encoding="utf-8")
         cls.skill_agent_metadata = (
             REPO_ROOT / "codex/skills/minutes/agents/openai.yaml"
@@ -37,7 +38,7 @@ class DocumentationContractTests(unittest.TestCase):
             "codex exec --ephemeral",
             "translation_manifest.json",
             "worker_contract_passed",
-            "20KB",
+            "24KB",
         )
 
         for relative_path, content in self.primary_docs.items():
@@ -57,13 +58,29 @@ class DocumentationContractTests(unittest.TestCase):
             with self.subTest(statement=statement):
                 self.assertNotIn(statement, self.plan)
 
+    def test_agent_guidance_prevents_combined_skill_and_recursive_job_output(self) -> None:
+        for phrase in (
+            "read each",
+            "`SKILL.md` in a separate tool call",
+            "at or below 16 KB",
+            "continue until EOF",
+            "Never recursively list a job directory",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.agents_guidance)
+
+        minutes_skill = self.primary_docs["codex/skills/minutes/SKILL.md"]
+        self.assertIn("in separate\n  tool calls", minutes_skill)
+        self.assertIn("continue to EOF before preprocessing", minutes_skill)
+
     def test_plan_records_current_local_quality_and_resource_profile(self) -> None:
         for phrase in (
             "CONTENT_AUDIT_MODE=strict",
             "OFFICIAL_SOURCE_VERIFICATION=auto",
-            "OCR_WORKERS=5",
+            "OCR_WORKERS=3",
             "OCR_FRAME_INTERVAL_SECONDS=5",
-            "OCR_FFMPEG_THREADS=4",
+            "OCR_FFMPEG_THREADS=2",
+            "OCR_PRESTART_COOLDOWN_SECONDS=20",
             "OCR_FRAME_EXTRACT_CPU_LIMIT_PERCENT=0",
             "OCR_TESSERACT_NICE=0",
             "OCR_MAX_SNAPSHOT_GAP_SECONDS=120",
@@ -154,7 +171,7 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("worker_contract_passed=true", skill)
         self.assertIn("Codex LLM provider에 노출될 수 있다", security)
         self.assertIn("file-change diff", security)
-        self.assertIn("20KB", security)
+        self.assertIn("24KB", security)
 
     def test_strict_fresh_jobs_require_ultra_derived_quality_artifacts(self) -> None:
         skill = self.primary_docs["codex/skills/minutes/SKILL.md"]
@@ -170,8 +187,12 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("content_freeze.json", quality_reference)
         self.assertIn("schema_version=3", quality_reference)
         self.assertIn("model-judged", quality_reference)
-        self.assertIn("blocking_defect_code", quality_reference)
+        self.assertIn("--blocking-defect-code", quality_reference)
         self.assertIn("review_cycles", quality_reference)
+        self.assertIn("required_item_checks", quality_reference)
+        self.assertIn("LOW_INFORMATION_DENSITY", quality_reference)
+        self.assertIn("3-5", quality_reference)
+        self.assertIn("target_section_ids", quality_reference)
         self.assertIn("translation-only turn", quality_reference)
         self.assertIn("do not summarize, fact-check, add, omit, restructure", quality_reference)
 
@@ -194,6 +215,24 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("validated final Markdown", quality_reference)
         self.assertIn("every latest page PNG at 100%", quality_reference)
         self.assertIn("warnings alone", quality_reference)
+        self.assertIn("copy and fill the retained Word", quality_reference)
+        self.assertIn("NATURAL_FINAL_PAGE_WHITESPACE", quality_reference)
+        self.assertIn("no maximum word, character", quality_reference)
+        self.assertNotIn("SHORT_FINAL_PAGE", quality_reference)
+        self.assertIn("blocking defect", quality_reference)
+
+    def test_primary_docs_describe_template_filling_without_content_cap(self) -> None:
+        for relative_path, content in self.primary_docs.items():
+            with self.subTest(path=relative_path):
+                self.assertIn("minutes-word-template.docx", content)
+                self.assertNotIn("standard_business_brief", content)
+                self.assertNotIn("SHORT_FINAL_PAGE", content)
+
+    def test_primary_docs_require_the_two_reader_visible_trust_sections(self) -> None:
+        for relative_path, content in self.primary_docs.items():
+            with self.subTest(path=relative_path):
+                self.assertIn("추가 검증이 필요한 항목", content)
+                self.assertIn("외부 근거 확인", content)
 
     def test_production_jobs_use_artifact_gates_not_repository_regression(self) -> None:
         skill = self.primary_docs["codex/skills/minutes/SKILL.md"]

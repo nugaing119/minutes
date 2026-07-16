@@ -3,6 +3,8 @@
 Use this workflow for every fresh-context strict Codex job. It captures the useful part of
 iterative Ultra work: evidence bookkeeping, adversarial review, bounded revision, and a
 verifiable stop condition. Do not copy reference-document word or page counts as targets.
+There is no maximum word, character, token, bullet, section, or page count for the reader document;
+all density checks below are minimum completeness gates.
 
 ## Contents
 
@@ -73,6 +75,8 @@ an over-fragmented outline, or a citation-heavy audit report. Use `schema_versio
 - ordered `sections`, each with a unique `id`, exact H2 `heading`, `role`, `form_factor`,
   `applicability`, and `primary_inventory_item_ids`. Use `rationale` when applicability is
   `not_applicable`.
+- `visual_evidence_plan`, with `status`, `rationale`, and `items`. Each item uses
+  `snapshot_path`, `section_id`, `purpose`, and `reader_value`.
 
 Allowed roles are `executive_synthesis`, `session_context`, `speaker_map`, `topic_analysis`,
 `operational_actions`, `open_questions`, `evidence_appendix`, and `external_evidence`. Allowed
@@ -95,14 +99,38 @@ The Markdown must implement the blueprint exactly:
   list rather than burying role attribution in prose;
 - when decisions, policies, follow-ups, availability, IAM, retention, or roadmap evidence
   exists, use one actionable checklist/table with at least three entries;
-- always include one open-questions section. Mark it `not_applicable` only when the inventory
-  truly contains no unresolved item and repeat the concrete rationale in the section;
-- when official sources were consulted, keep `external_evidence` as the final H2.
+- always include one `open_questions` section using exactly
+  `추가 검증이 필요한 항목` or `Items Requiring Further Verification`. Mark it
+  `not_applicable` only when the inventory truly contains no unresolved item and repeat the
+  concrete rationale in the section;
+- when official verification is enabled, always include one `external_evidence` section using
+  exactly `외부 근거 확인` or `External Evidence Check`, even when no claim required an
+  external lookup. Keep `open_questions` and `external_evidence` as the final two H2s in that
+  order. A `not_applicable` external section must display the exact sidecar reason, checked date,
+  recording-first rule, and privacy non-transmission statement. A completed external section
+  adds the checked official links and separates transcription/OCR support from video conflicts.
+  Record `checked_at` as the actual timezone-aware check time, never a planned or future time;
+  the freeze clock corrects only a same-day future skew and rejects other future dates.
+
+Use `visual_evidence_plan.status=embedded` only for 3-5 distinct core Snapshots that materially
+improve comprehension or verification. Keep their plan order identical to Markdown order, place no
+more than two full-width images in one H2, never place full-width images adjacently without
+substantive reader content between them, and keep substantive content after the last image. Use
+`limited` only when fewer than three selected Snapshots exist. Use `not_applicable` with a concrete
+rationale when no Snapshot adds reader value; image count is never a substitute for evidence
+coverage.
 
 The useful reference-quality pattern is cover and document type → readable evidence metadata →
 executive synthesis → optional speaker/topic map → a few deep topic groups → operational
 checklist/timeline → unresolved verification → external evidence. This is a functional pattern,
 not a fixed title list, word count, or page target.
+
+In `auto` mode, mark unresolved publicly verifiable product support, version, release/EOL,
+policy, security, and API claims as `official_verification=required` after local STT/OCR/Snapshot
+cross-checking. A presenter explanation or estimate remains a qualifier to preserve, not a reason
+to skip the check. Internal decisions and POC measurements remain local verification items when
+no authoritative public source applies. Numbering stays dynamic; only the final two functional
+headings and their order are fixed.
 
 Keep audit traceability in `content_inventory.json`, `content_audit.json`, and the evidence
 appendices. In the reader-facing body, raw `STT:`, `OCR:`, and `Snapshot:` strings are exceptions
@@ -137,14 +165,49 @@ Create `content_quality_review.json` with:
   `revised`), `findings`, and `changes`;
 - `final_checks`, containing only the eight model-judged failure classes above, each with
   `status=passed` and one concise concrete `finding`.
+- `required_item_checks`, containing every required inventory item exactly once in its primary
+  blueprint section. Each object uses `item_id`, `section_id`, and `dimensions` (not `checks`,
+  `inventory_item_id`, or `primary_section_id`). `dimensions` contains exactly `core_facts`,
+  `conditions_exceptions`, `risks_limitations`, `impact`, and `actions_decisions`.
+  `core_facts` must be `covered`; each other dimension must be either `covered` with a short
+  verbatim section reference or `not_applicable` with a concrete rationale. A covered reference
+  must be an exact substring of the assigned primary H2, including Markdown markers where used;
+  text that appears only in a separate action or question H2 does not satisfy the check.
 
 Do not calculate hashes, reviewed chunk indexes, inventory counts, or Markdown signals. After
 the review passes, run `python scripts/content_freeze.py <job-directory>`. It fills those
 deterministic bindings, reruns the complete content gate, and writes `content_freeze.json`.
-If a check fails, make one targeted revision and repeat the review. A third cycle is allowed only
-for a named blocking defect and must set `blocking_defect_code`; otherwise fail rather than chase
-diminishing-return edits. A short document can pass only when the ledger shows that the recording
-itself is low-information; brevity is not evidence of quality.
+If a check fails, revise only the failed sections once. Cycle 1 is `revised` and owns non-empty
+`findings`, `changes`, and `target_section_ids`; cycle 2 is `passed` with empty findings and
+changes. A third content cycle is forbidden.
+After the first freeze failure, inspect only the named JSON entries and H2 sections with bounded
+output, apply one targeted patch, and run the final freeze. Do not guess patch context from memory.
+The deterministic signals emit `LOW_INFORMATION_DENSITY` for a long recording whose reader body is
+unusually sparse. Treat it as an omission warning, not a word-count target: revisit only the named
+sections against the ledger, add evidence-backed specificity, and never add filler. The first
+warning writes validator-owned `content_density_baseline.json`; its target selection excludes
+evidence/external appendices and ranks substantive sections by information per required item. The
+single repair must use exactly those section IDs and increase the information characters of every
+target before the final pass. The baseline requires a minimum gain that closes 80% of the warning
+deficit, with that mandatory gain bounded to 400-1,800 information characters and at least 120 per
+target. The 1,800 value caps only what the validator requires in one repair; it never caps actual
+section or document length. Preserve every exact substring already
+used by `content_audit.json` or `required_item_checks`; prefer additive paragraphs/tables, or update
+all affected references in the same patch when a cited sentence must change. A short
+document can pass after that bounded review only when the ledger shows that the recording itself is
+low-information; brevity alone is not evidence of quality.
+
+If the content retry fails only because exact `document_refs` became stale, inspect only the named
+checks and their target H2s, perform one review-sidecar-only reference repair, and run one final
+freeze. Do not alter `minutes.md` in this mechanical recovery, and stop rather than rerunning freeze
+when the patch itself fails.
+Implement that repair through compact `content_review_patch.json` and
+`python scripts/apply_content_review_patch.py <job-directory>`; never direct-patch the finalized
+audit/review JSON. The helper accepts only named audit coverage and required-item dimension updates
+and preserves deterministic bindings, signals, and review cycles.
+Do not ask the worker to edit `review_cycles` for the density warning. After the target and total
+gains pass, `content_freeze.py` records the deterministic revised/pass cycles and measured section
+changes itself.
 
 For screen-driven content, explicitly decide whether selected snapshots should be embedded,
 referenced, or omitted. Base the choice on reader value and legibility, not snapshot count.
@@ -171,12 +234,21 @@ latest page renders. Both the source-frozen and final Markdown are immutable; vi
 only DOCX layout. Route a genuine semantic problem back as an explicit blocker instead of silently
 rewriting content.
 
-Run `python scripts/finalize_docx.py prepare <job-directory>` to generate, clean, render, and
-structurally audit in one bounded command. Inspect every latest page PNG at 100%. Revise for
-blocking defects only: clipping/overlap, missing glyph or content, blank interior page, broken
-TOC/bookmark, unreadable table, or orphan heading/split row. Accept a short final page, whitespace
-on one TOC page, intentional section whitespace, and mild readable wrapping as warnings when
-readability is intact.
+For every fresh Codex phase, a 10-minute JSON-event silence emits a heartbeat and a 15-minute
+silence terminates the phase with exit code 80. Treat this as a model/CLI stream stall, not as an
+STT/OCR CPU failure; retained phase logs make a clean retry diagnosable.
+
+Run `python scripts/finalize_docx.py prepare <job-directory>` to copy and fill the retained Word
+template, clean the render directory, render, and structurally audit in one bounded command. Inspect
+every latest page PNG at 100%. The first full render remains mandatory because Word pagination,
+tables, and images can change when the template slots are filled. Treat clipping/overlap, missing
+glyph or content, blank interior page, broken TOC/bookmark, unreadable table, orphan heading/split
+row, excessive interior layout gaps, adjacent large images, and image placement drift as blocking
+defects. `NATURAL_FINAL_PAGE_WHITESPACE`, single-page TOC whitespace, intentional section whitespace,
+and mild readable wrapping may remain as warnings.
+
+Last-page occupancy is diagnostic only. Never add filler, delete complete content, or reflow a
+document merely to change final-page whitespace. A warning alone cannot trigger another render.
 
 The first correction uses `prepare --reuse-final`. A third render requires an explicit supported
 `--blocking-defect-code`; warnings alone never authorize it. Write `visual_review.json` with every

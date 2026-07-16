@@ -135,8 +135,9 @@ python3 scripts/run_codex.py
 설치되는 skill은 `allow_implicit_invocation: false`를 사용한다. 사용자 전역 skill 폴더에
 있어도 다른 프로젝트 세션에 자동 주입되지 않으며 `$minutes`를 명시했을 때만 활성화된다.
 
-`$minutes`는 로컬 전처리와 근거·내용 감사를 담당한다. `finalize_docx.py`는 Codex에 번들된
-Documents renderer로 Word를 렌더링하고 delivery 세션이 전 페이지를 검증한다. 매 job마다
+`$minutes`는 로컬 전처리와 근거·내용 감사를 담당한다. `finalize_docx.py`는 번들된
+`codex/skills/minutes/assets/minutes-word-template.docx`의 표지·목차·본문 슬롯을 채운 뒤 Codex에
+번들된 Documents renderer로 Word를 렌더링하고 delivery 세션이 전 페이지를 검증한다. 매 job마다
 Documents `SKILL.md` 전문을 읽지 않으며, 이 저장소에서는 `minutes`만 복사한다. Documents
 renderer가 없는 Codex 설치는 먼저 업데이트한다.
 
@@ -193,9 +194,9 @@ OFFICIAL_SOURCE_VERIFICATION=auto
 
 원문이 한 context보다 길면 시간 구간별로 순차 처리해 같은 inventory에 누적한다. 구간별 서술 요약을 다시 종합하는 손실형 처리는 사용하지 않으며, context 한계 때문에 최종 문서 길이나 필수 내용을 줄이지 않는다.
 
-공식 문서 확인은 먼저 음성 문맥·시간별 STT·OCR·Snapshot을 교차 확인한 뒤에도 표현·고유명사·버전 또는 의미가 모호하거나 충돌할 때만 수행한다. 공식 근거는 전사를 보강할 수 있지만 명확한 영상 발언을 바꾸지 않는다. 검색어에는 공개 제품명·버전·일반화한 주장만 사용하고 STT/OCR 원문이나 개인·내부 식별 정보는 보내지 않는다.
+공식 문서 확인은 먼저 음성 문맥·시간별 STT·OCR·Snapshot을 교차 확인한 뒤에도 모호하거나 충돌하는 내용과 외부에서 확인 가능한 제품 지원·버전·출시·EOL·정책·보안·API 주장이 미해결일 때 수행한다. 발표자 설명이나 추정도 qualifier를 보존한 채 확인하며, 사내 결정과 POC 측정값은 로컬 추가 검증 대상으로 남긴다. 공식 근거는 전사를 보강할 수 있지만 명확한 영상 발언을 바꾸지 않는다. 검색어에는 공개 제품명·버전·일반화한 주장만 사용하고 STT/OCR 원문이나 개인·내부 식별 정보를 보내지 않는다.
 
-공식 문서를 사용했다면 최종 문서 맨 아래 `외부 근거 확인`에서 `전사·OCR 보강 근거`와 `영상 내용과 상충하는 근거`를 구분하고 timestamp, 조사 목적, 결과, 확인일과 링크를 남긴다. 상충하더라도 영상 본문은 그대로 유지한다.
+공식 확인 모드가 켜진 최종 문서는 `추가 검증이 필요한 항목`과 `외부 근거 확인`을 마지막 두 H2로 항상 둔다. 항목이 없으면 섹션을 없애지 않고 구체적인 사유와 확인일을 적는다. `외부 근거 확인`에는 영상 우선 원칙과 원문 STT/OCR·개인·내부 식별정보 비전송 사실을 표시한다. 공식 문서를 사용했다면 `전사·OCR 보강 근거`와 `영상 내용과 상충하는 근거`를 구분하고 timestamp, 조사 목적, 결과, 확인일과 링크를 남긴다. 상충하더라도 영상 본문은 그대로 유지하며 그 뒤에 다른 H2를 추가하지 않는다.
 
 ## 7. Codex 모드 수동 실행
 
@@ -239,21 +240,31 @@ Markdown과 감사 산출물을 잠근다. 목표 언어가 다르면 그 사이
 청크 manifest의 줄 번호는 원본 좌표이므로 part 파일에는 적용하지 않는다. 각 part 전체를 정확히
 한 번 읽고, 같은 part의 두 번째 명령은 launcher가 종료한다. prompt에 정확한 sidecar schema를
 선주입하고 freeze·translation·DOCX 명령에는 저장소의 절대 `.venv/bin/python` 경로를 사용한다.
-content 50회와 delivery 25회는 도구 왕복 비용 목표이며 감사나 전 페이지 검증을 줄이는 상한이 아니다.
+content 50회와 delivery 18회는 도구 왕복 비용 목표이며 감사나 전 페이지 검증을 줄이는 상한이 아니다.
 `CONTENT_AUDIT_MODE=strict`이면 `content_inventory.json`과 `content_audit.json`이
 통과해야만 보관되므로 새 세션 전환 때문에 근거 범위가 줄어들지 않는다.
+새 quality contract는 필수 inventory 항목마다 핵심 사실, 조건·예외, 위험·제한, 영향,
+실행·결정을 검사한다. 긴 녹화 대비 본문이 비정상적으로 희박하면
+`LOW_INFORMATION_DENSITY`를 내고 실패한 `target_section_ids`만 한 번 보강한다. 화면 이미지는
+독자 가치가 있는 핵심 3-5개를 먼저 계획하며 연속 대형 이미지와 문서 끝 이미지 배치를 동결 전에
+차단한다. 문서와 섹션에는 글자 수 상한이 없으며 밀도 검사는 최소 충실도만 요구한다.
+`finalize_docx.py`는 템플릿을 채운 뒤 최초 전 페이지 렌더를 한 번 수행한다. 마지막 페이지의
+자연스러운 여백은 `NATURAL_FINAL_PAGE_WHITESPACE` 경고일 뿐 재작성·재렌더링 사유가 아니다.
 
 각 worker는 `codex exec --json`의 JSONL을 단계별 job-local 이벤트 파일에만 저장한다.
 콘솔에는 단계 완료, 오류의 제한된 요약과
 최종 token 사용량만 표시하므로 임시 산출물 전문이나 대형 diff가 반복 출력되지 않는다.
+마지막 JSON 이벤트 이후 10분이면 heartbeat 경고를 표시하고 15분이면 exit code 80으로 종료한다.
+이 경우 로컬 STT/OCR이 아니라 Codex 모델·CLI 스트림이 멈춘 것으로 기록되며, 무한 대기하지 않는다.
 delivery 실패 후 재실행하면 유효한 freeze와 번역 manifest를 재사용해 콘텐츠 근거와 번역을
 다시 실행하지 않는다.
 `evidence_coverage.json`은 추출한 모든 영상 프레임의 해시,
 선택·제외 사유, Snapshot 대응과 최대 근거 간격을 기록한다.
 
-content와 delivery의 품질 계약은 launcher가 각각 8KB 미만 prompt에 미리 넣는다. worker는
-전체 `SKILL.md`나 reference를 열지 않는다. 단일 command output 또는 file-change diff가 20KB를
-넘거나 지침 파일 읽기가 감지되면 launcher가 해당 phase를 즉시 종료한다. handoff의
+content와 delivery의 품질 계약은 launcher가 각각 9KB 미만 prompt에 미리 넣는다. worker는
+전체 `SKILL.md`나 reference를 열지 않는다. 단일 command/read output이 24KB를 넘거나 지침 파일
+읽기가 감지되면 launcher가 해당 phase를 즉시 종료한다. file-change diff는 별도 계측하지만 문서
+내용이나 파일 크기를 제한하지 않는다. handoff의
 `worker_contract_passed`, `oversized_tool_output_count`, `forbidden_instruction_read_count`,
 `duplicate_evidence_chunk_read_count`로
 실행별 준수 여부를 확인한다.
@@ -322,33 +333,38 @@ PROCESS_NICE=10
 AUDIO_CPU_LIMIT_PERCENT=60
 OCR_FRAME_INTERVAL_SECONDS=5
 OCR_FRAME_EXTRACT_CPU_LIMIT_PERCENT=0
-OCR_FFMPEG_THREADS=4
-OCR_WORKERS=5
+OCR_FFMPEG_THREADS=2
+OCR_WORKERS=3
 OCR_TESSERACT_THREAD_LIMIT=1
 OCR_TESSERACT_NICE=0
+OCR_PRESTART_COOLDOWN_SECONDS=20
 OCR_MAX_SNAPSHOT_GAP_SECONDS=120
 ```
 
-현재 M3 Pro 실측에서는 동일 10분 구간의 프레임 120장 추출이
-`OCR_FFMPEG_THREADS=1`에서 16.77초, `4`에서 6.34초였다. Tesseract의
-`OCR_WORKERS=5`는 별도 병렬도이므로 그대로 유지한다.
+현재 M3 Pro의 저발열 기본값은 `OCR_FFMPEG_THREADS=2`, `OCR_WORKERS=3`이다.
+두 값은 각각 FFmpeg 디코더와 프레임별 Tesseract 병렬도를 독립적으로 제한한다.
+`OCR_PRESTART_COOLDOWN_SECONDS=20`은 MLX Whisper GPU/Metal 작업과 OCR CPU 작업 사이에
+냉각 구간을 기록 가능한 별도 단계로 넣는다.
 
 `OCR_WORKERS`는 서로 다른 프레임을 병렬 처리하는 프로세스 수이고,
-`OCR_TESSERACT_THREAD_LIMIT`은 각 프로세스 내부의 OpenMP 스레드 수다. 현재 11-core
-M3 Pro에서 검증한 기본 설정은 `OCR_WORKERS=5`, 내부 스레드 1을 사용한다. 이 값은 해당 장비에서
-수행한 비교 실험 결과를 `.env`에 명시한 것이며 스킬이나 런타임이 CPU 사용률을 보고
-worker 수를 자동 조정하지 않는다. 다른 Mac은 같은 값으로 시작하되 부하가 크면 별도로
-측정해 낮춘다. 고정 batch가 아니라 최대 `2 × OCR_WORKERS`의 bounded dynamic queue로 다음 프레임을
+`OCR_TESSERACT_THREAD_LIMIT`은 각 프로세스 내부의 OpenMP 스레드 수다. 30분 49초 영상의
+동일 370프레임 실측에서 기존 4 workers·FFmpeg 4 threads는 104.08초·평균 CPU 346.0%,
+새 3 workers·FFmpeg 2 threads는 115.15초·평균 CPU 215.3%였다. Snapshot 57개와 선택
+타임스탬프는 동일했고, 평균 CPU는 37.8% 줄었다.
+이 값은 `.env`에 명시하며 스킬이나 런타임이 CPU 사용률을 보고 worker 수를 자동 조정하지
+않는다. 다른 Mac은 같은 값으로 시작하되 부하가 크면 별도로 측정해 낮춘다. 고정 batch가
+아니라 최대 `2 × OCR_WORKERS`의 bounded dynamic queue로 다음 프레임을
 즉시 공급하며, 병렬 완료 순서와 무관하게 OCR 결과와 Snapshot은 원래 타임스탬프 순서로
 저장된다. 전체 job의 `PROCESS_NICE=10`을 자식이 상속하므로 Tesseract의 추가 nice 값은
 기본 0이다.
 
-팬 소음이나 순간 부하가 크면 `.env`에서 OCR 간격을 늘리거나 대기 시간을 추가한다.
+팬 소음이나 순간 부하가 계속 크면 증거 프레임 간격은 유지한 채 병렬도와 냉각 시간만 더
+보수적으로 바꾼다. 이 설정은 Snapshot 선택 기준이나 문서 근거량을 줄이지 않는다.
 
 ```env
-OCR_FRAME_INTERVAL_SECONDS=20
-OCR_FRAME_PAUSE_SECONDS=0.2
 OCR_WORKERS=2
+OCR_FFMPEG_THREADS=2
+OCR_PRESTART_COOLDOWN_SECONDS=30
 ```
 
 MLX 전사는 GPU/Metal을 사용하므로 CPU 백분율 제한 대상이 아니다. 전사 부하가 크면 `WHISPER_MODEL=mlx-community/whisper-medium`처럼 더 작은 모델로 낮춘다. `PROCESS_QOS=background`나 `maintenance`는 더 보수적이지만 전체 처리 시간이 크게 늘 수 있다.
@@ -365,10 +381,11 @@ wall/CPU time, 동시 worker, queue 대기, 프레임·Snapshot 수와 해시가
 ```bash
 nice -n 10 .venv/bin/python -m scripts.benchmark_ocr \
   "/absolute/path/to/video.mov" /private/tmp/minutes-ocr-benchmark \
-  --workers 5 --frame-interval 5 --frame-extract-cap 0 --tesseract-nice 0
+  --workers 3 --ffmpeg-threads 2 --frame-interval 5 \
+  --frame-extract-cap 0 --tesseract-nice 0
 ```
 
-31분 12.57초 검증 영상에서는 종전 10초 간격 187프레임·22 Snapshot·134.96초에서,
+과거 31분 12.57초 처리량 검증에서는 종전 10초 간격 187프레임·22 Snapshot·134.96초에서,
 현재 5초 간격 375프레임·42 Snapshot·65.917초로 바뀌었다. 최대 Snapshot 공백은
 480초에서 정책 상한 120초로 줄었고 현재 실행의 CPU time은 117.54초였다. 전체 375프레임은
 `evidence_coverage.json`에서 선택·제외 사유와 해시로 추적한다.

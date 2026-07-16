@@ -8,7 +8,11 @@ from pathlib import Path
 
 from scripts.content_quality import (
     MODEL_FINAL_CHECKS,
+    QUALITY_CONTRACT_VERSION,
+    REQUIRED_ITEM_DIMENSIONS,
     REQUIRED_FINAL_CHECKS,
+    _section_form_signals,
+    _validate_form_factor,
     finalize_compact_review,
     validate_content_quality_artifacts,
 )
@@ -40,6 +44,7 @@ def write_quality_artifacts(job_dir: Path) -> tuple[set[str], set[str], str]:
         job_dir / "evidence_chunks.json",
         {
             "schema_version": 1,
+            "quality_contract_version": QUALITY_CONTRACT_VERSION,
             "source_path": str(job_dir / "codex_minutes_input.md"),
             "source_sha256": "a" * 64,
             "source_bytes": 30,
@@ -118,14 +123,19 @@ def write_quality_artifacts(job_dir: Path) -> tuple[set[str], set[str], str]:
         "- The second condition changes operations.\n"
         "- The recording remains the source of truth.\n\n"
         "## Topic analysis\n\n"
-        "Both product conditions are preserved and explained together.\n\n"
+        "The first condition applies during baseline monitoring. "
+        "Its risk is missing drift. It affects operational readiness. "
+        "Team A must validate it.\n\n"
+        "The second condition applies during change preparation. "
+        "Its limitation is incomplete readiness data. It affects release timing. "
+        "Team B must prepare for it.\n\n"
         "## Operational actions\n\n"
         "| Owner | Action |\n"
         "|---|---|\n"
         "| Team A | Validate the first condition. |\n"
         "| Team B | Prepare for the second condition. |\n"
         "| Team C | Record the result. |\n\n"
-        "## Open questions\n\n"
+        "## Items Requiring Further Verification\n\n"
         "No unresolved questions remain.\n"
     )
     (job_dir / "minutes.md").write_text(minutes_text, encoding="utf-8")
@@ -138,6 +148,11 @@ def write_quality_artifacts(job_dir: Path) -> tuple[set[str], set[str], str]:
             "document_type": "Technical session analysis",
             "reader_goal": "Understand the conditions and act on them.",
             "front_matter": front_matter,
+            "visual_evidence_plan": {
+                "status": "not_applicable",
+                "rationale": "The fixture has no selected snapshots.",
+                "items": [],
+            },
             "sections": [
                 {
                     "id": "S01",
@@ -165,7 +180,7 @@ def write_quality_artifacts(job_dir: Path) -> tuple[set[str], set[str], str]:
                 },
                 {
                     "id": "S04",
-                    "heading": "Open questions",
+                    "heading": "Items Requiring Further Verification",
                     "role": "open_questions",
                     "form_factor": "prose",
                     "applicability": "not_applicable",
@@ -179,6 +194,34 @@ def write_quality_artifacts(job_dir: Path) -> tuple[set[str], set[str], str]:
         name: {"status": "passed", "finding": f"{name} checked"}
         for name in MODEL_FINAL_CHECKS
     }
+    required_item_checks = []
+    dimension_refs = {
+        "E001": {
+            "core_facts": "The first condition applies during baseline monitoring.",
+            "conditions_exceptions": "The first condition applies during baseline monitoring.",
+            "risks_limitations": "Its risk is missing drift.",
+            "impact": "It affects operational readiness.",
+            "actions_decisions": "Team A must validate it.",
+        },
+        "E002": {
+            "core_facts": "The second condition applies during change preparation.",
+            "conditions_exceptions": "The second condition applies during change preparation.",
+            "risks_limitations": "Its limitation is incomplete readiness data.",
+            "impact": "It affects release timing.",
+            "actions_decisions": "Team B must prepare for it.",
+        },
+    }
+    for item_id, refs in dimension_refs.items():
+        required_item_checks.append(
+            {
+                "item_id": item_id,
+                "section_id": "S02",
+                "dimensions": {
+                    name: {"status": "covered", "document_refs": [refs[name]]}
+                    for name in REQUIRED_ITEM_DIMENSIONS
+                },
+            }
+        )
     write_json(
         job_dir / "content_quality_review.json",
         {
@@ -193,6 +236,7 @@ def write_quality_artifacts(job_dir: Path) -> tuple[set[str], set[str], str]:
                 }
             ],
             "final_checks": final_checks,
+            "required_item_checks": required_item_checks,
         },
     )
     finalize_compact_review(job_dir)
@@ -218,6 +262,117 @@ class ContentQualityTests(unittest.TestCase):
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["chunk_count"], 2)
         self.assertEqual(result["ledger_inventory_items"], 2)
+
+    def test_open_questions_uses_the_canonical_trust_heading(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
+            noncanonical_text = minutes_text.replace(
+                "## Items Requiring Further Verification",
+                "## Open questions",
+            )
+            (job_dir / "minutes.md").write_text(noncanonical_text, encoding="utf-8")
+            blueprint = json.loads(
+                (job_dir / "document_blueprint.json").read_text(encoding="utf-8")
+            )
+            blueprint["sections"][-1]["heading"] = "Open questions"
+            write_json(job_dir / "document_blueprint.json", blueprint)
+            finalize_compact_review(job_dir)
+            issues: list[str] = []
+
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=noncanonical_text,
+                issues=issues,
+            )
+
+        self.assertTrue(any("canonical open_questions heading" in issue for issue in issues))
+
+    def test_official_verification_contract_requires_the_final_trust_section(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
+            write_json(
+                job_dir / "official_sources.json",
+                {
+                    "schema_version": 1,
+                    "status": "not_applicable",
+                    "checked_at": "2026-07-16T12:00:00+09:00",
+                    "policy": "official_only",
+                    "appendix_heading": "External Evidence Check",
+                    "reason": "No unresolved public claim remained after local cross-checking.",
+                    "claims": [],
+                    "privacy": {"raw_transcript_or_ocr_sent": False},
+                },
+            )
+            issues: list[str] = []
+
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=minutes_text,
+                issues=issues,
+            )
+
+        self.assertTrue(
+            any("requires exactly one external_evidence section" in issue for issue in issues)
+        )
+
+    def test_trust_sections_are_the_final_two_h2_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
+            reason = "No unresolved public claim remained after local cross-checking."
+            trusted_text = (
+                minutes_text.rstrip()
+                + "\n\n## External Evidence Check\n\n"
+                + reason
+                + "\n"
+            )
+            (job_dir / "minutes.md").write_text(trusted_text, encoding="utf-8")
+            blueprint = json.loads(
+                (job_dir / "document_blueprint.json").read_text(encoding="utf-8")
+            )
+            blueprint["sections"].append(
+                {
+                    "id": "S05",
+                    "heading": "External Evidence Check",
+                    "role": "external_evidence",
+                    "form_factor": "prose",
+                    "applicability": "not_applicable",
+                    "rationale": reason,
+                    "primary_inventory_item_ids": [],
+                }
+            )
+            write_json(job_dir / "document_blueprint.json", blueprint)
+            write_json(
+                job_dir / "official_sources.json",
+                {
+                    "schema_version": 1,
+                    "status": "not_applicable",
+                    "checked_at": "2026-07-16T12:00:00+09:00",
+                    "policy": "official_only",
+                    "appendix_heading": "External Evidence Check",
+                    "reason": reason,
+                    "claims": [],
+                    "privacy": {"raw_transcript_or_ocr_sent": False},
+                },
+            )
+            finalize_compact_review(job_dir)
+            issues: list[str] = []
+
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=trusted_text,
+                issues=issues,
+            )
+
+        self.assertEqual(issues, [])
 
     def test_material_chunk_without_inventory_mapping_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -281,6 +436,30 @@ class ContentQualityTests(unittest.TestCase):
             )
 
         self.assertTrue(
+            any("must contain the blueprint document type line" in x for x in issues)
+        )
+
+    def test_front_matter_accepts_bulleted_document_type(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
+            bulleted_text = minutes_text.replace(
+                "Document type: Technical session analysis",
+                "- Document type: Technical session analysis",
+            )
+            (job_dir / "minutes.md").write_text(bulleted_text, encoding="utf-8")
+            finalize_compact_review(job_dir)
+            issues: list[str] = []
+
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=bulleted_text,
+                issues=issues,
+            )
+
+        self.assertFalse(
             any("must contain the blueprint document type line" in x for x in issues)
         )
 
@@ -397,7 +576,362 @@ class ContentQualityTests(unittest.TestCase):
         self.assertGreater(finalized["document_signals"]["minutes_bytes"], 0)
         self.assertEqual(finalized["document_signals"]["inventory_item_count"], 2)
 
-    def test_compact_review_third_cycle_requires_blocking_defect(self) -> None:
+    def test_compact_review_normalizes_common_model_schema_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
+            review = json.loads((job_dir / "content_quality_review.json").read_text())
+            for item in review["required_item_checks"]:
+                item["inventory_item_id"] = item.pop("item_id")
+                item["primary_section_id"] = item.pop("section_id")
+                item["checks"] = item.pop("dimensions")
+            review["review_cycles"] = [
+                {
+                    "cycle": 1,
+                    "status": "revised",
+                    "findings": ["TARGETED_REPAIR in S02"],
+                    "changes": [],
+                },
+                {
+                    "cycle": 2,
+                    "status": "passed",
+                    "findings": [],
+                    "changes": ["Expanded only S02 from the evidence inventory."],
+                    "target_section_ids": ["S02"],
+                },
+            ]
+            write_json(job_dir / "content_quality_review.json", review)
+
+            finalized = finalize_compact_review(job_dir)
+            issues: list[str] = []
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=minutes_text,
+                issues=issues,
+            )
+
+        first_item = finalized["required_item_checks"][0]
+        self.assertIn("item_id", first_item)
+        self.assertIn("section_id", first_item)
+        self.assertIn("dimensions", first_item)
+        self.assertNotIn("checks", first_item)
+        self.assertEqual(
+            finalized["review_cycles"][0]["target_section_ids"],
+            ["S02"],
+        )
+        self.assertEqual(
+            finalized["review_cycles"][0]["changes"],
+            ["Expanded only S02 from the evidence inventory."],
+        )
+        self.assertEqual(finalized["review_cycles"][1]["changes"], [])
+        self.assertFalse(any("required_item_checks" in issue for issue in issues))
+        self.assertFalse(any("LOW_INFORMATION_DENSITY" in issue for issue in issues))
+
+    def test_mixed_form_factor_counts_a_substantive_image(self) -> None:
+        signals = _section_form_signals(
+            "A prose explanation introduces the architecture.\n\n"
+            "![Architecture](snapshots/snapshot_0001.jpg)"
+        )
+        issues: list[str] = []
+
+        _validate_form_factor(
+            "mixed",
+            signals,
+            label="document_blueprint.json sections[0]",
+            issues=issues,
+        )
+
+        self.assertEqual(issues, [])
+
+    def test_quality_contract_requires_substance_checks_for_every_required_item(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
+            review = json.loads((job_dir / "content_quality_review.json").read_text())
+            review["required_item_checks"] = review["required_item_checks"][:1]
+            write_json(job_dir / "content_quality_review.json", review)
+            issues: list[str] = []
+
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=minutes_text,
+                issues=issues,
+            )
+
+        self.assertTrue(
+            any("required_item_checks must exactly cover" in issue for issue in issues)
+        )
+
+    def test_substance_check_references_must_resolve_in_primary_section(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
+            review = json.loads((job_dir / "content_quality_review.json").read_text())
+            review["required_item_checks"][0]["dimensions"]["risks_limitations"][
+                "document_refs"
+            ] = ["Record the result."]
+            write_json(job_dir / "content_quality_review.json", review)
+            issues: list[str] = []
+
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=minutes_text,
+                issues=issues,
+            )
+
+        self.assertTrue(
+            any("was not found in the assigned minutes.md section" in issue for issue in issues)
+        )
+
+    def test_low_density_warning_requires_one_targeted_revision_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
+            write_json(
+                job_dir / "speech_activity.json",
+                {"audio_duration_seconds": 3_600},
+            )
+            finalized = finalize_compact_review(job_dir)
+            issues: list[str] = []
+
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=minutes_text,
+                issues=issues,
+            )
+            self.assertTrue(finalized["document_signals"]["density_warning"])
+            baseline = json.loads(
+                (job_dir / "content_density_baseline.json").read_text()
+            )
+            self.assertEqual(
+                baseline["length_policy"],
+                "minimum_completeness_only_no_maximum",
+            )
+            self.assertEqual(baseline["target_section_ids"], ["S02"])
+            self.assertTrue(
+                any("LOW_INFORMATION_DENSITY" in issue for issue in issues)
+            )
+
+            expanded_text = minutes_text.replace(
+                "Team B must prepare for it.",
+                "Team B must prepare for it. The team must also record the baseline, "
+                "compare the observed change with the release threshold, and retain the "
+                "result so the operational decision remains auditable. "
+                + (
+                    "The evidence-backed implementation note preserves the observed "
+                    "condition, exception, operational risk, downstream impact, owner, "
+                    "verification method, and acceptance result without changing the claim. "
+                    * 14
+                ),
+            )
+            (job_dir / "minutes.md").write_text(expanded_text, encoding="utf-8")
+            finalized = finalize_compact_review(job_dir)
+            issues = []
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=expanded_text,
+                issues=issues,
+            )
+
+        self.assertFalse(any("LOW_INFORMATION_DENSITY" in issue for issue in issues))
+        self.assertEqual(finalized["review_cycles"][0]["status"], "revised")
+        self.assertEqual(
+            finalized["review_cycles"][0]["target_section_ids"],
+            ["S02"],
+        )
+        self.assertTrue(
+            any(
+                "information_chars" in change
+                for change in finalized["review_cycles"][0]["changes"]
+            )
+        )
+
+    def test_low_density_revision_rejects_noop_or_wrong_section_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
+            write_json(
+                job_dir / "speech_activity.json",
+                {"audio_duration_seconds": 3_600},
+            )
+            finalize_compact_review(job_dir)
+            review = json.loads((job_dir / "content_quality_review.json").read_text())
+            review["review_cycles"] = [
+                {
+                    "cycle": 1,
+                    "status": "revised",
+                    "findings": ["LOW_INFORMATION_DENSITY in S03"],
+                    "changes": ["Changed only the action appendix."],
+                    "target_section_ids": ["S03"],
+                },
+                {
+                    "cycle": 2,
+                    "status": "passed",
+                    "findings": [],
+                    "changes": [],
+                },
+            ]
+            write_json(job_dir / "content_quality_review.json", review)
+            finalize_compact_review(job_dir)
+            issues: list[str] = []
+
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=minutes_text,
+                issues=issues,
+            )
+
+        self.assertTrue(
+            any("target_section_ids must exactly match" in issue for issue in issues)
+        )
+        self.assertTrue(
+            any("did not gain enough information" in issue for issue in issues)
+        )
+
+    def test_visual_plan_rejects_adjacent_full_width_images(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
+            snapshots = job_dir / "snapshots"
+            snapshots.mkdir()
+            paths = [f"snapshots/snapshot_{index:04}.jpg" for index in range(1, 4)]
+            for relative in paths:
+                (job_dir / relative).write_bytes(b"snapshot")
+            visual_text = minutes_text.replace(
+                "Its risk is missing drift. It affects operational readiness.",
+                "Its risk is missing drift.\n\n"
+                f"![Risk screen]({paths[0]})\n\n"
+                f"![Impact screen]({paths[1]})\n\n"
+                "It affects operational readiness.",
+            ).replace(
+                "| Team C | Record the result. |",
+                "| Team C | Record the result. |\n\n"
+                f"![Action screen]({paths[2]})\n\n"
+                "Record the verified result after the image.",
+            )
+            (job_dir / "minutes.md").write_text(visual_text, encoding="utf-8")
+            blueprint = json.loads(
+                (job_dir / "document_blueprint.json").read_text(encoding="utf-8")
+            )
+            blueprint["visual_evidence_plan"] = {
+                "status": "embedded",
+                "rationale": "Three distinct screens materially support the reader.",
+                "items": [
+                    {
+                        "snapshot_path": paths[0],
+                        "section_id": "S02",
+                        "purpose": "Show the risk state.",
+                        "reader_value": "Makes the operational risk legible.",
+                    },
+                    {
+                        "snapshot_path": paths[1],
+                        "section_id": "S02",
+                        "purpose": "Show the impact state.",
+                        "reader_value": "Distinguishes impact from risk.",
+                    },
+                    {
+                        "snapshot_path": paths[2],
+                        "section_id": "S03",
+                        "purpose": "Show the action state.",
+                        "reader_value": "Supports the execution checklist.",
+                    },
+                ],
+            }
+            write_json(job_dir / "document_blueprint.json", blueprint)
+            finalize_compact_review(job_dir)
+            issues: list[str] = []
+
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=visual_text,
+                issues=issues,
+            )
+
+        self.assertTrue(
+            any("adjacent full-width Markdown images" in issue for issue in issues)
+        )
+
+    def test_visual_plan_accepts_three_core_images_spread_across_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
+            snapshots = job_dir / "snapshots"
+            snapshots.mkdir()
+            paths = [f"snapshots/snapshot_{index:04}.jpg" for index in range(1, 4)]
+            for relative in paths:
+                (job_dir / relative).write_bytes(b"snapshot")
+            visual_text = minutes_text.replace(
+                "- The recording remains the source of truth.",
+                "- The recording remains the source of truth.\n\n"
+                f"![Summary screen]({paths[0]})\n\n"
+                "The summary image anchors the main distinction.",
+            ).replace(
+                "Team A must validate it.\n\n",
+                "Team A must validate it.\n\n"
+                f"![Condition screen]({paths[1]})\n\n",
+            ).replace(
+                "| Team C | Record the result. |",
+                "| Team C | Record the result. |\n\n"
+                f"![Action screen]({paths[2]})\n\n"
+                "The action image supports the checklist without replacing it.",
+            )
+            (job_dir / "minutes.md").write_text(visual_text, encoding="utf-8")
+            blueprint = json.loads(
+                (job_dir / "document_blueprint.json").read_text(encoding="utf-8")
+            )
+            blueprint["visual_evidence_plan"] = {
+                "status": "embedded",
+                "rationale": "Three distinct screens support summary, condition, and action.",
+                "items": [
+                    {
+                        "snapshot_path": paths[0],
+                        "section_id": "S01",
+                        "purpose": "Anchor the executive distinction.",
+                        "reader_value": "Improves summary comprehension.",
+                    },
+                    {
+                        "snapshot_path": paths[1],
+                        "section_id": "S02",
+                        "purpose": "Show the operating condition.",
+                        "reader_value": "Supports the detailed analysis.",
+                    },
+                    {
+                        "snapshot_path": paths[2],
+                        "section_id": "S03",
+                        "purpose": "Show the action state.",
+                        "reader_value": "Supports checklist execution.",
+                    },
+                ],
+            }
+            write_json(job_dir / "document_blueprint.json", blueprint)
+            finalize_compact_review(job_dir)
+            issues: list[str] = []
+
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=visual_text,
+                issues=issues,
+            )
+
+        self.assertEqual(issues, [])
+
+    def test_quality_contract_allows_only_one_targeted_revision(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             job_dir = Path(temp_dir)
             inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
@@ -418,13 +952,16 @@ class ContentQualityTests(unittest.TestCase):
                 issues=issues,
             )
 
-        self.assertTrue(any("third cycle requires" in issue for issue in issues))
+        self.assertTrue(any("must not exceed 2" in issue for issue in issues))
 
     def test_schema_v2_review_remains_valid_for_existing_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             job_dir = Path(temp_dir)
             inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
             review = json.loads((job_dir / "content_quality_review.json").read_text())
+            manifest = json.loads((job_dir / "evidence_chunks.json").read_text())
+            manifest.pop("quality_contract_version")
+            write_json(job_dir / "evidence_chunks.json", manifest)
             bindings = review.pop("bindings")
             review.update(bindings)
             review["schema_version"] = 2

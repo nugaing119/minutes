@@ -3,13 +3,17 @@ from __future__ import annotations
 import json
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from scripts.media_types import is_video_extension
-from scripts.content_quality import validate_content_quality_artifacts
+from scripts.content_quality import (
+    TRUST_APPENDIX_DISCLOSURES,
+    TRUST_SECTION_HEADINGS,
+    validate_content_quality_artifacts,
+)
 
 
 AUDIT_MODES = {"off", "warn", "strict"}
@@ -95,8 +99,8 @@ def content_fidelity_instruction(
         requirement = (
             "외부 검증 가능한 최신성 민감 주장을 폭넓게 확인하세요."
             if official_source_verification == "required"
-            else "OCR·STT가 모호하거나 서로 충돌하거나 고유명사·버전 표기가 불확실할 "
-            "때만 보조적으로 확인하세요."
+            else "로컬 교차 확인 후에도 모호·충돌하거나, 외부에서 확인 가능한 제품 지원·"
+            "버전·출시·종료 일정·정책·보안·API 주장이 미해결 상태일 때 확인하세요."
         )
         parts.extend(
             [
@@ -104,9 +108,11 @@ def content_fidelity_instruction(
                 "## Latest official-source verification / 최신 공식 문서 검증",
                 "",
                 f"공식 문서 검증 모드: {official_source_verification}. {requirement}",
-                "auto 모드에서는 로컬 근거 교차 확인 후에도 남은 모호성·충돌에 해당하는 "
-                "inventory item만 official_verification=required로 표시하고, 명확한 영상 "
-                "내용은 not_applicable로 유지하세요.",
+                "auto 모드에서는 로컬 근거 교차 확인 후에도 남은 모호성·충돌과, 외부에서 "
+                "확인 가능한 제품 지원·버전·출시·EOL·정책·보안·API 주장을 "
+                "official_verification=required로 표시하세요. 발표자 설명이나 추정이라는 "
+                "이유만으로 확인을 생략하지 말고 그 qualifier를 본문에 보존하세요. 사내 "
+                "결정과 POC 측정값은 로컬 추가 검증 대상으로 남길 수 있습니다.",
                 "먼저 음성 문맥, 시간 인접 STT, OCR, Snapshot을 교차 확인하세요. 그래도 "
                 "의미나 표기가 불명확할 때 제품 지원 상태, 버전, 출시·종료 일정, 규정, "
                 "보안, API 동작을 최신 공식 문서, 공식 release note, 공식 service "
@@ -117,15 +123,24 @@ def content_fidelity_instruction(
                 "공식 문서는 불명확한 단어·제품명·버전 표기를 보조할 수 있지만 명확한 영상 "
                 "발언의 의미를 바꿀 수 없습니다. 최신 공식 문서가 영상 발언과 상충하면 "
                 "본문에는 영상 내용을 그대로 유지하세요.",
-                "공식 문서를 이용해 모호한 전사·OCR을 보강했거나 상충 여부를 확인했다면 "
-                "최종 문서 맨 아래에 한국어 문서는 "
-                "`## 외부 근거 확인`, 영어 문서는 `## External Evidence Check` 섹션을 "
-                "추가하세요. 내부에서 `전사·OCR 보강 근거`와 `영상 내용과 상충하는 근거`를 "
-                "구분하고, 각 항목에 영상에서 말한 내용과 timestamp, 공식 문서를 사용한 "
-                "목적, 확인 결과, 차이 또는 보강한 표현, 확인일, 공식 Markdown 링크를 함께 "
-                "적으세요. 이 섹션 뒤에는 다른 H2 섹션을 추가하지 마세요.",
+                "최종 두 H2는 한국어 문서의 `## 추가 검증이 필요한 항목`과 "
+                "`## 외부 근거 확인`, 영어 문서의 "
+                "`## Items Requiring Further Verification`과 "
+                "`## External Evidence Check`로 고정하세요. 번호는 앞선 주제 수에 따라 "
+                "자동으로 이어지며 제목에 하드코딩하지 마세요. 미해결 항목이 없거나 외부 "
+                "확인이 필요하지 않아도 섹션을 삭제하지 말고 구체적인 판단 사유를 표시하세요.",
+                "외부 확인 섹션에는 확인일과 다음 언어별 정책 문장을 그대로 넣으세요: "
+                f"한국어 `{TRUST_APPENDIX_DISCLOSURES['ko'][0]}` / "
+                f"`{TRUST_APPENDIX_DISCLOSURES['ko'][1]}`; 영어 "
+                f"`{TRUST_APPENDIX_DISCLOSURES['en'][0]}` / "
+                f"`{TRUST_APPENDIX_DISCLOSURES['en'][1]}`.",
+                "공식 문서를 이용했다면 내부에서 `전사·OCR 보강 근거`와 "
+                "`영상 내용과 상충하는 근거`를 구분하고, 각 항목에 영상 내용과 timestamp, "
+                "조사 목적, 확인 결과, 차이 또는 보강한 표현, 확인일, 공식 Markdown 링크를 "
+                "함께 적으세요. 외부 확인 섹션 뒤에는 다른 H2를 추가하지 마세요.",
                 "같은 job 폴더에 official_sources.json을 작성하세요. schema_version=1, "
-                "status(completed|not_applicable|blocked), checked_at, policy=official_only, "
+                "status(completed|not_applicable), 실제 현재 시각의 timezone-aware checked_at "
+                "(미래 시각 금지), policy=official_only, "
                 "appendix_heading, claims, privacy를 포함하세요.",
                 "각 claim은 inventory_item_ids, status(verified|contradicted|"
                 "partially_verified|not_found), current_official_finding, "
@@ -141,7 +156,8 @@ def content_fidelity_instruction(
                 "privacy.raw_transcript_or_ocr_sent는 반드시 false여야 합니다. 관련 공식 "
                 "자료에서 직접 확인하지 못하면 not_found로 표시하고, 확인한 공식 문서·검색 "
                 "범위의 링크와 조사 범위를 마지막 섹션에 기록하며 현재 사실처럼 단정하지 "
-                "마세요. 검증 대상 자체가 없으면 status=not_applicable과 reason을 쓰세요.",
+                "마세요. 검증 대상 자체가 없으면 status=not_applicable과 reason을 쓰고, "
+                "같은 reason을 마지막 외부 확인 섹션에 그대로 표시하세요.",
             ]
         )
 
@@ -852,48 +868,96 @@ def _validate_official_sources(
             "official_sources.json must confirm raw_transcript_or_ocr_sent=false"
         )
     checked_at = _nonempty_string(official.get("checked_at"))
+    checked_date: str | None = None
     if not checked_at:
         issues.append("official_sources.json checked_at is required")
     else:
         try:
-            datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
+            checked_datetime = datetime.fromisoformat(
+                checked_at.replace("Z", "+00:00")
+            )
+            if checked_datetime.tzinfo is None or checked_datetime.utcoffset() is None:
+                issues.append(
+                    "official_sources.json checked_at must include a timezone offset"
+                )
+            else:
+                now = datetime.now(checked_datetime.tzinfo)
+                if checked_datetime > now + timedelta(minutes=5):
+                    issues.append(
+                        "official_sources.json checked_at cannot be in the future"
+                    )
+            checked_date = checked_datetime.date().isoformat()
         except ValueError:
             issues.append("official_sources.json checked_at must be ISO 8601")
+
+    claims = official.get("claims")
+    if not isinstance(claims, list):
+        issues.append("official_sources.json claims must be a list")
+        claims = []
+    appendix_heading = _nonempty_string(official.get("appendix_heading"))
+    appendix_start = len(minutes_text)
+    appendix_text = ""
+    canonical_external_headings = set(
+        TRUST_SECTION_HEADINGS["external_evidence"].values()
+    )
+    appendix_language: str | None = None
+    if not appendix_heading:
+        issues.append("official_sources.json appendix_heading is required")
+    else:
+        if appendix_heading not in canonical_external_headings:
+            issues.append(
+                "official_sources.json appendix_heading must use the canonical "
+                "external-evidence heading"
+            )
+        else:
+            appendix_language = next(
+                language
+                for language, heading in TRUST_SECTION_HEADINGS[
+                    "external_evidence"
+                ].items()
+                if heading == appendix_heading
+            )
+        appendix_start, appendix_text = _extract_final_appendix(
+            minutes_text,
+            appendix_heading,
+            issues,
+        )
+    if checked_date and checked_date not in appendix_text:
+        issues.append(
+            "the final official-evidence appendix must display the checked_at date"
+        )
+    if appendix_language:
+        for disclosure in TRUST_APPENDIX_DISCLOSURES[appendix_language]:
+            if disclosure not in appendix_text:
+                issues.append(
+                    "the final official-evidence appendix is missing a required "
+                    "recording/privacy disclosure"
+                )
 
     if status == "not_applicable":
         if official_ids:
             issues.append(
                 "official verification is marked not_applicable despite required items"
             )
-        if not _nonempty_string(official.get("reason")):
+        reason = _nonempty_string(official.get("reason"))
+        if not reason:
             issues.append("official_sources.json reason is required when not_applicable")
+        elif reason not in appendix_text:
+            issues.append(
+                "the not_applicable official verification reason must appear in the "
+                "final appendix"
+            )
+        if claims:
+            issues.append(
+                "official_sources.json claims must be empty when status=not_applicable"
+            )
         return status
 
-    claims = official.get("claims")
-    if not isinstance(claims, list):
-        issues.append("official_sources.json claims must be a list")
-        return status
     if not claims and not official_ids:
         issues.append(
             "official_sources.json must use status=not_applicable when no claims apply"
         )
 
-    appendix_required = bool(claims)
-    appendix_heading = _nonempty_string(official.get("appendix_heading"))
-    appendix_start = len(minutes_text)
-    appendix_text = ""
-    if appendix_required:
-        if not appendix_heading:
-            issues.append(
-                "official_sources.json appendix_heading is required when official evidence "
-                "was consulted"
-            )
-        else:
-            appendix_start, appendix_text = _extract_final_appendix(
-                minutes_text,
-                appendix_heading,
-                issues,
-            )
     body_text = minutes_text[:appendix_start]
 
     checked_ids: set[str] = set()

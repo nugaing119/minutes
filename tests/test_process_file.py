@@ -28,6 +28,10 @@ def make_settings(root: Path, speaker_mode: str = "evidence") -> SimpleNamespace
         vad_model_dir=root / "models" / "silero-vad-6.2.1",
         process_qos="utility",
         process_nice=10,
+        ocr_ffmpeg_threads=2,
+        ocr_workers=3,
+        ocr_tesseract_thread_limit=1,
+        ocr_prestart_cooldown_seconds=0.0,
         audio_sample_rate=16000,
         cleanup_job_media_after_archive=True,
         cleanup_job_ocr_images_after_archive=True,
@@ -199,17 +203,28 @@ class ProcessFileRegressionTests(unittest.TestCase):
             root = Path(temp_dir)
             source = root / "meeting.mp4"
             source.write_bytes(b"source")
+            settings = make_settings(root)
+            settings.ocr_prestart_cooldown_seconds = 2.5
 
             with (
-                patch("scripts.process_file.load_settings", return_value=make_settings(root)),
+                patch("scripts.process_file.load_settings", return_value=settings),
                 patch.dict("sys.modules", {"scripts.transcribe": fake_transcribe_module()}),
                 patch("scripts.ocr.run_ocr", side_effect=RuntimeError("ocr failed")),
+                patch("scripts.process_file.time.sleep") as sleep,
             ):
                 job_dir = process_file(source)
 
             screen = json.loads((job_dir / "screen_text.json").read_text(encoding="utf-8"))
+            metrics = json.loads(
+                (job_dir / "process_metrics.json").read_text(encoding="utf-8")
+            )
             self.assertEqual(screen["status"], "failed")
             self.assertTrue((job_dir / "codex_minutes_input.md").exists())
+            sleep.assert_called_once_with(2.5)
+            self.assertIn(
+                "pre_ocr_cooldown",
+                {stage["step"] for stage in metrics["stages"]},
+            )
 
     def test_evidence_mode_uses_timed_stt_ocr_and_snapshots_without_diarization(
         self,
@@ -293,8 +308,12 @@ class ProcessFileRegressionTests(unittest.TestCase):
                 metrics["resource_policy"]["local_audio_diarization"],
                 "disabled_by_policy",
             )
-            self.assertEqual(metrics["resource_policy"]["ocr_workers"], 5)
-            self.assertEqual(metrics["resource_policy"]["ocr_ffmpeg_threads"], 4)
+            self.assertEqual(metrics["resource_policy"]["ocr_workers"], 3)
+            self.assertEqual(metrics["resource_policy"]["ocr_ffmpeg_threads"], 2)
+            self.assertEqual(
+                metrics["resource_policy"]["ocr_prestart_cooldown_seconds"],
+                0.0,
+            )
             self.assertEqual(
                 metrics["resource_policy"]["ocr_tesseract_thread_limit"],
                 1,

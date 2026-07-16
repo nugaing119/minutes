@@ -84,6 +84,7 @@ def build_benchmark_report(
         },
         "configuration": {
             "frame_interval_seconds": result.get("frame_interval_seconds"),
+            "ffmpeg_threads": result.get("ffmpeg_threads"),
             "workers": result.get("workers"),
             "tesseract_thread_limit": result.get("tesseract_thread_limit"),
             "tesseract_nice_increment": result.get("tesseract_nice"),
@@ -133,6 +134,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--detected-language", default="ko")
     parser.add_argument("--workers", type=int)
+    parser.add_argument("--ffmpeg-threads", type=int)
     parser.add_argument("--frame-interval", type=int)
     parser.add_argument("--frame-extract-cap", type=int)
     parser.add_argument("--tesseract-nice", type=int)
@@ -155,6 +157,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     overrides: dict[str, Any] = {}
     if args.workers is not None:
         overrides["ocr_workers"] = args.workers
+    if args.ffmpeg_threads is not None:
+        overrides["ocr_ffmpeg_threads"] = args.ffmpeg_threads
     if args.frame_interval is not None:
         overrides["ocr_frame_interval_seconds"] = args.frame_interval
     if args.frame_extract_cap is not None:
