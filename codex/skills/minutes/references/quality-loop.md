@@ -190,11 +190,26 @@ Create `content_quality_review.json` with:
 Do not calculate hashes, reviewed chunk indexes, inventory counts, or Markdown signals. After
 the review passes, run `python scripts/content_freeze.py <job-directory>`. It fills those
 deterministic bindings, reruns the complete content gate, and writes `content_freeze.json`.
-If a check fails, revise only the failed sections once. Cycle 1 is `revised` and owns non-empty
+If the pre-freeze adversarial check fails, revise only the failed sections once while authoring the
+artifacts. Cycle 1 is `revised` and owns non-empty
 `findings`, `changes`, and `target_section_ids`; cycle 2 is `passed` with empty findings and
 changes. A third content cycle is forbidden.
-After the first freeze failure, inspect only the named JSON entries and H2 sections with bounded
-output, apply one targeted patch, and run the final freeze. Do not guess patch context from memory.
+Run the freeze exactly once in the evidence-reading content turn. After a successful content-model
+turn, the launcher writes a prompt/hash-bound `content_generation_checkpoint.json`. If the freeze
+fails, stop that worker without rereading evidence, editing artifacts, or retrying the freeze. The
+launcher starts at most one isolated repair turn from the checkpoint. It receives the bounded
+validator error, may inspect only the named content-sidecar entries and implicated H2 excerpts, and
+must never read media, transcript, OCR, evidence chunks, Snapshots, validator source, tests, or web
+results. It writes only bounded `content_repair_patch.json`, applies it through
+`scripts/apply_content_repair_patch.py`, and runs the freeze once. The helper validates every update
+before writing, accepts only model-owned audit/review/blueprint/official-source fields plus exact
+single-occurrence Markdown replacements, and emits counts instead of a large diff. Never use a raw
+parent-side `codex exec` repair.
+
+If that single repair fails, retain the checkpoint and stop. Do not automatically repeat the
+multi-million-token content turn. An operator must use `--force-content-rebuild` to explicitly
+discard generated content and authorize a new evidence read.
+
 The deterministic signals emit `LOW_INFORMATION_DENSITY` for a long recording whose reader body is
 unusually sparse. Treat it as an omission warning, not a word-count target: revisit only the named
 sections against the ledger, add evidence-backed specificity, and never add filler. The first
@@ -210,15 +225,9 @@ all affected references in the same patch when a cited sentence must change. A s
 document can pass after that bounded review only when the ledger shows that the recording itself is
 low-information; brevity alone is not evidence of quality.
 
-If the content retry fails only because exact `document_refs` became stale, inspect only the named
-checks and their target H2s, perform one review-sidecar-only reference repair, and run one final
-freeze. Do not alter `minutes.md` in this mechanical recovery, and stop rather than rerunning freeze
-when the patch itself fails.
-Implement that repair through compact `content_review_patch.json` and
-`python scripts/apply_content_review_patch.py <job-directory>`; never direct-patch the finalized
-audit/review JSON. The helper accepts only named audit coverage and required-item dimension updates
-and preserves deterministic bindings, signals, and review cycles.
-Do not ask the worker to edit `review_cycles` for the density warning. After the target and total
+Exact-reference repairs use the same compact content-repair patch surface; never direct-patch the
+large finalized audit/review JSON. Do not ask the repair worker to edit `review_cycles` for a density
+warning. After the target and total
 gains pass, `content_freeze.py` records the deterministic revised/pass cycles and measured section
 changes itself.
 

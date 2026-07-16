@@ -132,7 +132,23 @@ repository. Do not assume the input is a meeting.
   fields and enums; write large artifacts in one multi-file patch and run the absolute repository
   `.venv/bin/python` freeze command without validator-source inspection. Then complete inventory, drafting, audit, compact quality
   review, and `content_freeze.json` in the source language when translation is required. It must
-  not create a DOCX or archive. The optional translation turn receives only frozen `minutes.md`,
+  not create a DOCX or archive. The content prompt includes literal schema-v3 object examples for
+  audit fidelity, model final checks, official-source claims, and form-factor rules; do not replace
+  those objects with pipe-delimited lists. Run the freeze once. On failure, return its bounded error
+  without rereading evidence, editing artifacts, or retrying the freeze.
+- After any successful content-model turn, the launcher writes
+  `content_generation_checkpoint.json` with the content-prompt hash and current generated-artifact
+  hashes before accepting the freeze. A missing or invalid freeze must never trigger another full
+  evidence-reading content turn automatically. Reuse the checkpoint and start at most one isolated
+  `content_repair` phase. That phase receives only the bounded validator error and implicated content
+  sidecars, cannot read media/STT/OCR/evidence chunks/Snapshots/validator code/tests, and writes only
+  `content_repair_patch.json`. Apply it through `scripts/apply_content_repair_patch.py`, then run the
+  freeze once. The helper permits only model-owned fields in audit/review/blueprint/official-source
+  sidecars plus exact single-occurrence Markdown replacements, validates every operation before
+  writing, and emits counts rather than a diff. Never launch a raw parent-side `codex exec` repair.
+  If this repair fails, stop with the checkpoint retained; require the explicit
+  `--force-content-rebuild` flag before discarding generated content and rereading raw evidence.
+  The optional translation turn receives only frozen `minutes.md`,
   writes `minutes.translated.md` as its final response without tools, and is accepted only after
   `translation_manifest.json` binds the source freeze and target hash while verifying Markdown
   structure and protected literals. The delivery worker must not read STT, OCR, evidence chunks,
@@ -150,8 +166,8 @@ repository. Do not assume the input is a meeting.
   result over 24KB or any worker attempt to read the full instruction files above. It records
   file-change diffs separately as artifact-change metrics; they do not trigger the 24KB stop and
   never cap Markdown or DOCX size. It also terminates a duplicate evidence-part read. The command
-  output limit is fail-closed, not truncation followed by continuation. Target at most 50 content
-  and 18 delivery tool calls as
+  output limit is fail-closed, not truncation followed by continuation. Target at most 50 content,
+  12 content-repair, and 18 delivery tool calls as
   a cost objective without skipping evidence or all-page QA. `fresh_codex_handoff.json` must report
   `worker_contract_passed=true`, zero oversized tool outputs, zero forbidden instruction reads,
   and zero duplicate evidence chunk reads.
@@ -232,13 +248,16 @@ The recovery requires a minimum gain that closes 80% of the warning deficit, wit
 minimum bounded to 400-1,800 information characters and at least 120 per target. This bounds only
 the mandatory repair size; it does not impose a maximum on any section or final document. Repairs are additive by default so exact audit/review
 references remain valid; any changed cited sentence requires all affected references in the same patch.
-If the content retry then fails only on stale exact references, allow one bounded review-sidecar-only
-reference repair and final freeze; never change `minutes.md`, and never rerun freeze after a failed patch.
-After freeze, do not patch the large audit/review JSON files directly. Put only named reference
-updates in `content_review_patch.json` and apply them with
-`scripts/apply_content_review_patch.py`; validator-owned bindings, signals, and cycles stay intact.
-The worker does not patch density `review_cycles`; once all required minimum gains pass,
-`content_freeze.py` writes the deterministic revised/pass cycle, targets, and measured changes.
+After a successful content turn, the launcher checkpoints the generated artifacts before validating
+the freeze. If validation fails, the original evidence-reading worker stops. One isolated repair
+worker may inspect only the named sidecar entries and implicated H2 excerpts, write the bounded
+`content_repair_patch.json`, run `scripts/apply_content_repair_patch.py`, and run the freeze once.
+It never patches large audit/review files directly, reads raw evidence, or emits their diffs. The
+helper rejects validator-owned bindings, signals, density baselines, ledger, and inventory changes.
+Once all required minimum gains pass, `content_freeze.py` writes deterministic revised/pass cycles,
+targets, and measured changes. If the bounded repair fails, retain its checkpoint and require
+`--force-content-rebuild` for an explicit full evidence reread; never repeat full content merely
+because a sidecar schema or exact reference was invalid.
 When translation is required, the launcher then starts one
 low-reasoning, tool-free translation turn from frozen `minutes.md` and validates it with:
 

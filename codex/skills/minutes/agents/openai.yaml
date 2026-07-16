@@ -1,6 +1,6 @@
 interface:
-  display_name: "Local Media Documentation"
+  display_name: "Minutes"
   short_description: "Local STT, OCR, and evidence-based documents"
-  default_prompt: "Use $minutes to process local media with the configured low-heat OCR profile, write actual meetings as concise objective minutes and other recordings in a document-appropriate voice, keep production logs out of reader deliverables, audit required-item depth without a length cap, translate once only when needed, then fill the retained Word template and verify every page once."
+  default_prompt: "Use $minutes to process local media with the configured low-heat OCR profile, write actual meetings as concise objective minutes and other recordings in a document-appropriate voice, keep production logs out of reader deliverables, audit required-item depth without a length cap, checkpoint a completed content turn and repair only invalid sidecars once without rereading evidence, translate once only when needed, then fill the retained Word template and verify every page once."
 policy:
   allow_implicit_invocation: false

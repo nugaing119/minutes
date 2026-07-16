@@ -16,7 +16,7 @@ import time
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Sequence, TextIO
+from typing import Any, Mapping, Sequence, TextIO
 
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -50,7 +50,7 @@ from scripts.utils import now_local, read_json, write_json
 
 
 FRESH_CONTEXT_ENV = "MINUTES_FRESH_CONTEXT"
-HANDOFF_SCHEMA_VERSION = 6
+HANDOFF_SCHEMA_VERSION = 7
 MAX_REQUEST_OVERRIDES = 4
 MAX_REQUEST_CHARS = 500
 MAX_CONSOLE_ERROR_CHARS = 500
@@ -87,12 +87,65 @@ WORKER_EVIDENCE_CHUNKS_NAME = "evidence_chunks.json"
 WORKER_EVIDENCE_CHUNKS_DIR = "evidence_chunks"
 WORKER_RUNTIME_SUMMARY_NAME = "worker_runtime_summary.json"
 CONTENT_FREEZE_NAME = "content_freeze.json"
+CONTENT_CHECKPOINT_NAME = "content_generation_checkpoint.json"
+CONTENT_REPAIR_PATCH_NAME = "content_repair_patch.json"
+CONTENT_CHECKPOINT_SCHEMA_VERSION = 1
+MAX_CONTENT_REPAIR_ATTEMPTS = 1
 FRESH_PHASES = ("content", "translation", "delivery")
+SUPPORTED_FRESH_PHASES = ("content", "content_repair", "translation", "delivery")
 TOOL_ROUND_TRIP_TARGETS = {
     "content": 50,
+    "content_repair": 12,
     "translation": 0,
     "delivery": 18,
 }
+CONTENT_GENERATED_ARTIFACT_NAMES = (
+    "minutes.md",
+    "content_inventory.json",
+    "evidence_ledger.json",
+    "document_blueprint.json",
+    "official_sources.json",
+    "content_audit.json",
+    "content_quality_review.json",
+    "content_density_baseline.json",
+)
+CONTENT_CHECKPOINT_STATES = {
+    "awaiting_validation",
+    "awaiting_repair",
+    "repair_running",
+    "repair_failed",
+    "frozen",
+}
+CONTENT_REPAIR_FORBIDDEN_COMMAND_MARKERS = (
+    "codex_minutes_input.md",
+    "evidence_chunks/",
+    "evidence_chunks.json",
+    "evidence_coverage.json",
+    "transcript.json",
+    "transcript.txt",
+    "transcript.srt",
+    "screen_text.json",
+    "screen_text.txt",
+    "worker_runtime_summary.json",
+    "status.json",
+    "process_metrics.json",
+    "speaker_attribution_report.json",
+    "speech_activity.json",
+    "/snapshots",
+    "/frames",
+    ".mov",
+    ".mp4",
+    ".mkv",
+    ".m4a",
+    ".mp3",
+    ".wav",
+    ".aac",
+    ".flac",
+    ".ogg",
+    "scripts/content_audit.py",
+    "scripts/content_quality.py",
+    "/tests/",
+)
 WORKER_EVIDENCE_LINES_PER_CHUNK = 500
 WORKER_EVIDENCE_MAX_BYTES_PER_CHUNK = 15_000
 WORKER_REVIEW_REASONS = {
@@ -126,6 +179,10 @@ class CodexStreamSummary:
     large_artifact_change_count: int = 0
     forbidden_instruction_read_count: int = 0
     forbidden_instruction_reads: list[dict[str, object]] = field(
+        default_factory=list
+    )
+    forbidden_artifact_write_count: int = 0
+    forbidden_artifact_writes: list[dict[str, object]] = field(
         default_factory=list
     )
     evidence_chunk_paths_seen: set[str] = field(default_factory=set)
@@ -171,6 +228,8 @@ class CodexStreamSummary:
             "large_artifact_change_threshold_bytes": OVERSIZED_TOOL_OUTPUT_BYTES,
             "forbidden_instruction_read_count": self.forbidden_instruction_read_count,
             "forbidden_instruction_reads": list(self.forbidden_instruction_reads),
+            "forbidden_artifact_write_count": self.forbidden_artifact_write_count,
+            "forbidden_artifact_writes": list(self.forbidden_artifact_writes),
             "evidence_chunk_read_count": len(self.evidence_chunk_paths_seen),
             "duplicate_evidence_chunk_read_count": (
                 self.duplicate_evidence_chunk_read_count
@@ -181,6 +240,7 @@ class CodexStreamSummary:
             "worker_contract_passed": (
                 self.oversized_tool_output_count == 0
                 and self.forbidden_instruction_read_count == 0
+                and self.forbidden_artifact_write_count == 0
                 and self.duplicate_evidence_chunk_read_count == 0
             ),
         }
@@ -224,6 +284,129 @@ def file_record(path: Path) -> dict[str, object]:
         "bytes": path.stat().st_size,
         "sha256": sha256_file(path),
     }
+
+
+def content_artifact_snapshot(job_dir: Path) -> dict[str, dict[str, object]]:
+    snapshot: dict[str, dict[str, object]] = {}
+    for name in CONTENT_GENERATED_ARTIFACT_NAMES:
+        path = job_dir / name
+        if path.is_file():
+            snapshot[name] = {
+                "present": True,
+                "bytes": path.stat().st_size,
+                "sha256": sha256_file(path),
+            }
+        else:
+            snapshot[name] = {"present": False}
+    return snapshot
+
+
+def write_content_generation_checkpoint(
+    job_dir: Path,
+    *,
+    content_prompt: str,
+    state: str,
+    repair_attempts: int,
+    validation_error: str | None = None,
+) -> dict[str, object]:
+    if state not in CONTENT_CHECKPOINT_STATES:
+        raise ValueError(f"unsupported content checkpoint state: {state}")
+    if (
+        isinstance(repair_attempts, bool)
+        or not isinstance(repair_attempts, int)
+        or not 0 <= repair_attempts <= MAX_CONTENT_REPAIR_ATTEMPTS
+    ):
+        raise ValueError("repair_attempts is out of range")
+    checkpoint: dict[str, object] = {
+        "schema_version": CONTENT_CHECKPOINT_SCHEMA_VERSION,
+        "state": state,
+        "updated_at": now_local().isoformat(),
+        "content_prompt_sha256": hashlib.sha256(
+            content_prompt.encode("utf-8")
+        ).hexdigest(),
+        "repair_attempts": repair_attempts,
+        "artifacts": content_artifact_snapshot(job_dir),
+    }
+    if validation_error:
+        checkpoint["validation_error"] = _bounded_text(
+            validation_error,
+            max_chars=12_000,
+        )
+    write_json(job_dir / CONTENT_CHECKPOINT_NAME, checkpoint)
+    return checkpoint
+
+
+def inspect_content_generation_checkpoint(
+    job_dir: Path,
+    *,
+    content_prompt: str,
+) -> dict[str, object]:
+    path = job_dir / CONTENT_CHECKPOINT_NAME
+    if not path.is_file():
+        return {"exists": False, "valid": False}
+    try:
+        checkpoint = read_json(path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"exists": True, "valid": False, "error": _bounded_console_text(exc)}
+    if not isinstance(checkpoint, Mapping):
+        return {
+            "exists": True,
+            "valid": False,
+            "error": "checkpoint must contain a JSON object",
+        }
+    prompt_hash = hashlib.sha256(content_prompt.encode("utf-8")).hexdigest()
+    valid = (
+        checkpoint.get("schema_version") == CONTENT_CHECKPOINT_SCHEMA_VERSION
+        and checkpoint.get("state") in CONTENT_CHECKPOINT_STATES
+        and isinstance(checkpoint.get("repair_attempts"), int)
+        and not isinstance(checkpoint.get("repair_attempts"), bool)
+        and 0
+        <= int(checkpoint.get("repair_attempts", -1))
+        <= MAX_CONTENT_REPAIR_ATTEMPTS
+        and isinstance(checkpoint.get("artifacts"), dict)
+    )
+    return {
+        "exists": True,
+        "valid": valid,
+        "prompt_matches": checkpoint.get("content_prompt_sha256") == prompt_hash,
+        "artifacts_match": checkpoint.get("artifacts")
+        == content_artifact_snapshot(job_dir),
+        "state": checkpoint.get("state"),
+        "repair_attempts": checkpoint.get("repair_attempts"),
+        "validation_error": checkpoint.get("validation_error"),
+    }
+
+
+def select_content_action(
+    job_dir: Path,
+    *,
+    content_prompt: str,
+    force_content_rebuild: bool = False,
+) -> str:
+    if force_content_rebuild:
+        return "run_content"
+    freeze_path = job_dir / CONTENT_FREEZE_NAME
+    if freeze_path.is_file():
+        try:
+            from scripts.content_freeze import validate_content_freeze
+
+            validate_content_freeze(job_dir)
+            return "reuse_freeze"
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+    checkpoint = inspect_content_generation_checkpoint(
+        job_dir,
+        content_prompt=content_prompt,
+    )
+    if not checkpoint.get("exists"):
+        return "run_content"
+    if not checkpoint.get("valid"):
+        return "checkpoint_invalid"
+    if not checkpoint.get("prompt_matches"):
+        return "checkpoint_mismatch"
+    if int(checkpoint.get("repair_attempts", 0)) >= MAX_CONTENT_REPAIR_ATTEMPTS:
+        return "repair_exhausted"
+    return "run_repair"
 
 
 def directory_record(directory: Path, pattern: str) -> dict[str, object]:
@@ -776,11 +959,15 @@ def configured_codex_runtime(
     return result
 
 
-def _bounded_console_text(value: object) -> str:
+def _bounded_text(value: object, *, max_chars: int) -> str:
     text = " ".join(str(value).split())
-    if len(text) <= MAX_CONSOLE_ERROR_CHARS:
+    if len(text) <= max_chars:
         return text
-    return text[: MAX_CONSOLE_ERROR_CHARS - 1] + "…"
+    return text[: max_chars - 1] + "…"
+
+
+def _bounded_console_text(value: object) -> str:
+    return _bounded_text(value, max_chars=MAX_CONSOLE_ERROR_CHARS)
 
 
 def _event_error_message(event: Mapping[str, object]) -> str:
@@ -816,12 +1003,32 @@ def _tool_item_preview(item: Mapping[str, object]) -> str:
     return _bounded_console_text(item.get("type", "unknown tool item"))
 
 
+def _file_change_paths(item: Mapping[str, object]) -> list[str]:
+    paths: list[str] = []
+    direct_path = item.get("path")
+    if isinstance(direct_path, str) and direct_path:
+        paths.append(direct_path)
+    changes = item.get("changes")
+    if isinstance(changes, Mapping):
+        changes = [changes]
+    if isinstance(changes, list):
+        for change in changes:
+            if not isinstance(change, Mapping):
+                continue
+            path = change.get("path")
+            if isinstance(path, str) and path:
+                paths.append(path)
+    return paths
+
+
 def record_codex_event(
     event: Mapping[str, object],
     summary: CodexStreamSummary,
     *,
     elapsed_seconds: float,
     progress_stream: TextIO,
+    forbidden_command_markers: Sequence[str] = (),
+    allowed_file_change_names: Sequence[str] | None = None,
 ) -> None:
     event_type = str(event.get("type", "unknown"))
     if event_type == "thread.started":
@@ -917,7 +1124,12 @@ def record_codex_event(
                     )
     if item_type == "command_execution":
         command = str(item.get("command", ""))
-        if any(marker in command for marker in FORBIDDEN_WORKER_INSTRUCTION_MARKERS):
+        lowered_command = command.lower()
+        forbidden_markers = (
+            *FORBIDDEN_WORKER_INSTRUCTION_MARKERS,
+            *forbidden_command_markers,
+        )
+        if any(marker.lower() in lowered_command for marker in forbidden_markers):
             summary.forbidden_instruction_read_count += 1
             if (
                 len(summary.forbidden_instruction_reads)
@@ -953,6 +1165,27 @@ def record_codex_event(
                         ).hexdigest(),
                     }
                 )
+    if item_type == "file_change" and allowed_file_change_names is not None:
+        paths = _file_change_paths(item)
+        allowed_names = set(allowed_file_change_names)
+        forbidden_paths = [
+            path for path in paths if Path(path).name not in allowed_names
+        ]
+        if not paths or forbidden_paths:
+            summary.forbidden_artifact_write_count += 1
+            if (
+                len(summary.forbidden_artifact_writes)
+                < MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS
+            ):
+                summary.forbidden_artifact_writes.append(
+                    {
+                        "item_id": str(item.get("id", "")),
+                        "paths": [_bounded_console_text(path) for path in paths],
+                        "forbidden_paths": [
+                            _bounded_console_text(path) for path in forbidden_paths
+                        ],
+                    }
+                )
     item_id = item.get("id")
     if item_type not in NON_TOOL_ITEM_TYPES and isinstance(item_id, str):
         summary.tool_item_ids.add(item_id)
@@ -964,6 +1197,8 @@ def consume_codex_event_line(
     *,
     elapsed_seconds: float,
     progress_stream: TextIO,
+    forbidden_command_markers: Sequence[str] = (),
+    allowed_file_change_names: Sequence[str] | None = None,
 ) -> None:
     summary.event_count += 1
     summary.event_bytes += len(raw_line.encode("utf-8"))
@@ -978,6 +1213,8 @@ def consume_codex_event_line(
             summary,
             elapsed_seconds=elapsed_seconds,
             progress_stream=progress_stream,
+            forbidden_command_markers=forbidden_command_markers,
+            allowed_file_change_names=allowed_file_change_names,
         )
 
 
@@ -992,6 +1229,8 @@ def run_codex_json_stream(
     heartbeat_seconds: float = CODEX_STREAM_HEARTBEAT_SECONDS,
     stall_timeout_seconds: float = CODEX_STREAM_STALL_TIMEOUT_SECONDS,
     poll_interval_seconds: float = CODEX_STREAM_POLL_INTERVAL_SECONDS,
+    forbidden_command_markers: Sequence[str] = (),
+    allowed_file_change_names: Sequence[str] | None = None,
 ) -> tuple[int, CodexStreamSummary]:
     events_path.parent.mkdir(parents=True, exist_ok=True)
     summary = CodexStreamSummary()
@@ -1107,6 +1346,9 @@ def run_codex_json_stream(
                 previous_instruction_read_count = (
                     summary.forbidden_instruction_read_count
                 )
+                previous_artifact_write_count = (
+                    summary.forbidden_artifact_write_count
+                )
                 previous_duplicate_chunk_read_count = (
                     summary.duplicate_evidence_chunk_read_count
                 )
@@ -1115,6 +1357,8 @@ def run_codex_json_stream(
                     summary,
                     elapsed_seconds=time.perf_counter() - started,
                     progress_stream=progress_stream,
+                    forbidden_command_markers=forbidden_command_markers,
+                    allowed_file_change_names=allowed_file_change_names,
                 )
                 output_budget_exceeded = (
                     summary.oversized_tool_output_count > previous_violation_count
@@ -1123,6 +1367,10 @@ def run_codex_json_stream(
                     summary.forbidden_instruction_read_count
                     > previous_instruction_read_count
                 )
+                artifact_write_detected = (
+                    summary.forbidden_artifact_write_count
+                    > previous_artifact_write_count
+                )
                 duplicate_chunk_read_detected = (
                     summary.duplicate_evidence_chunk_read_count
                     > previous_duplicate_chunk_read_count
@@ -1130,6 +1378,7 @@ def run_codex_json_stream(
                 if (
                     output_budget_exceeded
                     or instruction_read_detected
+                    or artifact_write_detected
                     or duplicate_chunk_read_detected
                 ):
                     budget_exceeded = True
@@ -1145,6 +1394,12 @@ def run_codex_json_stream(
                         detail = (
                             "forbidden worker instruction read"
                             f" (command={violation['command']})"
+                        )
+                    elif artifact_write_detected:
+                        violation = summary.forbidden_artifact_writes[-1]
+                        detail = (
+                            "forbidden artifact write"
+                            f" (paths={violation['paths']})"
                         )
                     else:
                         violation = summary.duplicate_evidence_chunk_reads[-1]
@@ -1188,6 +1443,58 @@ def run_codex_json_stream(
     return returncode, summary
 
 
+def _content_audit_contract_fragment() -> str:
+    return (
+        '{"schema_version":1,"status":"passed","covered_item_ids":["..."],'
+        '"missing_item_ids":[],"documented_conflict_ids":[],"recording_fidelity":'
+        '{"preserved_item_ids":["..."],"rewritten_by_external_source_item_ids":[]},'
+        '"coverage":[{"item_id":"...","document_refs":["exact minutes substring"]}],'
+        '"conflict_coverage":[],"qualifier_changes":[],"silent_conflicts":[],'
+        '"intentional_omissions":[]}'
+    )
+
+
+def _quality_review_contract_fragment() -> str:
+    checks = ",".join(
+        f'"{name}":{{"status":"passed","finding":"concrete finding"}}'
+        for name in MODEL_FINAL_CHECKS
+    )
+    return (
+        '{"schema_version":3,"status":"passed","review_cycles":['
+        '{"cycle":1,"status":"passed","findings":[],"changes":[]}],'
+        f'"final_checks":{{{checks}}},'
+        '"required_item_checks":[{"item_id":"...","section_id":"...",'
+        '"dimensions":{"core_facts":{"status":"covered","document_refs":'
+        '["exact primary-H2 substring"]},"conditions_exceptions":'
+        '{"status":"not_applicable","rationale":"concrete reason"},'
+        '"risks_limitations":{"status":"not_applicable","rationale":"concrete reason"},'
+        '"impact":{"status":"not_applicable","rationale":"concrete reason"},'
+        '"actions_decisions":{"status":"not_applicable","rationale":"concrete reason"}}}]}'
+    )
+
+
+def _official_sources_contract_fragment() -> str:
+    return (
+        'completed claim={"inventory_item_ids":["..."],"status":'
+        '"verified","purpose":"transcription_disambiguation","appendix_category":'
+        '"transcription_or_ocr_support","appendix_category_heading":'
+        '"exact H3","recording_content_preserved":true,"current_official_finding":'
+        '"...","document_treatment":"...","recording_document_refs":'
+        '["exact body substring"],"appendix_document_refs":["exact appendix substring"],'
+        '"sources":[{"title":"...","url":"https://...","publisher":"...",'
+        '"source_type":"official","published_or_updated":"..."}]}; '
+        'top-level={"schema_version":1,"status":"completed",'
+        '"policy":"official_only","checked_at":"timezone-aware ISO-8601",'
+        '"appendix_heading":"canonical final H2","claims":[...],'
+        '"privacy":{"raw_transcript_or_ocr_sent":false}}; claim status is one of verified, '
+        'contradicted, partially_verified, not_found; auto purpose/category mapping is '
+        'transcription_disambiguation=>transcription_or_ocr_support or '
+        'source_conflict_resolution=>video_conflict; not_applicable uses status=not_applicable, '
+        'reason, claims=[] and the same policy/checked_at/heading/privacy fields; required mode '
+        'additionally allows current_fact_check=>current_official_status'
+    )
+
+
 def build_fresh_prompt(
     repo_root: Path,
     job_dir: Path,
@@ -1224,7 +1531,6 @@ def build_fresh_prompt(
     blueprint_forms = "|".join(sorted(BLUEPRINT_FORM_FACTORS))
     blueprint_writing_styles = "|".join(sorted(BLUEPRINT_WRITING_STYLES))
     front_matter_keys = "|".join(sorted(REQUIRED_FRONT_MATTER_KEYS))
-    model_final_checks = "|".join(MODEL_FINAL_CHECKS)
     required_item_dimensions = "|".join(REQUIRED_ITEM_DIMENSIONS)
     language_contract = (
         "Write validated minutes.md in the detected source language. Do not translate; the "
@@ -1285,10 +1591,12 @@ def build_fresh_prompt(
         "primary_inventory_item_ids[] and rationale when not applicable. H2 order must equal section "
         "order; assign every required item to exactly one primary section; use exactly one "
         "executive_synthesis and open_questions, operational_actions when actionable evidence exists, "
-        "and <=6 topic_analysis H2s. The final two H2s: `Items Requiring Further Verification`, "
+        "and <=6 topic_analysis H2s. grouped_bullets needs >=3 bullets; table and timeline "
+        "requires a Markdown table; checklist needs >=3 entries; definition_list requires >=2 "
+        "labeled `label: value` lines; source_list needs a real Markdown link; mixed needs two of "
+        "prose/bullets/table/image. The final two H2s: `Items Requiring Further Verification`, "
         "`External Evidence Check` (English) or `추가 검증이 필요한 항목`, `외부 근거 확인` "
-        "(Korean); keep both if not_applicable. mixed needs two of "
-        "prose/bullets/table/image; source_list needs a real Markdown link.\n"
+        "(Korean); keep both if not_applicable.\n"
         "  visual_evidence_plan{status,rationale,items[{snapshot_path,section_id,purpose,reader_value}]}; "
         "embedded=3-5 core images; limited only if <3; Markdown order, <=2/H2, no adjacent "
         "full-width images, with content after the last.\n"
@@ -1299,15 +1607,16 @@ def build_fresh_prompt(
         "  Front matter is reader metadata, not a production log: require date/duration; optional "
         "purpose/participants; forbid language/evidence-policy, model/skill/token, "
         "preprocess/render/QA, hashes, and internal paths.\n"
-        "- content_audit.json: schema_version=1,status=passed; missing_item_ids,qualifier_changes,"
-        "silent_conflicts,rewritten_by_external_source_item_ids are empty; covered_item_ids includes "
-        "every required item. coverage/conflict_coverage bind IDs to unique verbatim minutes refs; "
-        "recording_fidelity preserves recording content.\n"
+        f"- content_audit.json exact model-owned shape: {_content_audit_contract_fragment()} "
+        "documented_conflict_ids covers every conflict; covered_item_ids plus intentional_omissions "
+        "disposes every inventory item; each intentional omission is {item_id,reason}; "
+        "recording_fidelity.preserved_item_ids covers covered items.\n"
         "Do not expose raw STT/OCR/Snapshot refs anywhere. Omit internal "
         "artifacts/paths/hashes, model/tool/token use, preprocessing, render attempts, or QA mechanics; "
         "use natural image captions.\n"
-        f"- content_quality_review.json: schema_version=3,status=passed; review_cycles starts with "
-        f"one clean pass; final_checks exactly {model_final_checks}, each passed+finding. "
+        f"- content_quality_review.json schema_version=3 exact model-owned shape: "
+        f"{_quality_review_contract_fragment()} "
+        "final_checks is an object, never a list. "
         "required_item_checks uses item_id,section_id,dimensions; never `checks`, inventory_item_id, "
         f"or primary_section_id. dimensions exactly {required_item_dimensions}; core_facts=covered; "
         "others covered+verbatim ref or N/A+rationale. Each covered ref is an exact substring of that "
@@ -1317,10 +1626,11 @@ def build_fresh_prompt(
         "No character maximum; use additive edits preserving refs. Do not patch review_cycles; "
         "content_freeze writes deterministic revised/pass cycles. Structural validity alone is not a quality pass.\n"
         "- Auto checks unresolved public support/version/release/EOL/policy/security/API claims; a "
-        "presenter estimate is no exemption. N/A official_sources: schema_version=1,status=not_applicable,"
-        "current offset checked_at (not future),policy=official_only,appendix_heading,reason,claims:[],"
-        "privacy:{raw_transcript_or_ocr_sent:false}; final section gives reason/date and "
-        "non-transmission without pipeline details.\n\n"
+        "presenter estimate is no exemption. official_sources exact model-owned shape: "
+        f"{_official_sources_contract_fragment()}. In auto mode current_fact_check is forbidden. "
+        "Category must match purpose; completed claims require an exact H3, body/appendix refs, "
+        "and an official URL shown in the appendix. Final section gives checked date, recording-first "
+        "and non-transmission disclosures without pipeline details.\n\n"
         "Complete only content artifacts. Do not delete, move, recreate, or hash raw frames/Snapshots; "
         "validators own frame accounting. Preserve useful Snapshots and verify all Markdown Snapshot "
         "refs resolve. Do not treat raw Snapshot count as the evidence-coverage gate. Follow "
@@ -1329,15 +1639,63 @@ def build_fresh_prompt(
         "precheck. Run exactly "
         f"`{freeze_command}`; it fills deterministic bindings, reruns all content gates, and writes "
         "content_freeze.json. Do not create, edit, render, or inspect a DOCX; do not archive or mark "
-        "completed. On first failure, inspect only the named JSON entries and H2 sections <=16KB and fix "
-        "minutes/blueprint in one patch without rewriting unrelated sections. Never direct-patch audit/review "
-        "JSON after freeze. For stale refs, create content_review_patch.json with schema_version=1 plus "
-        "audit_coverage_updates[{item_id,document_refs}] and/or review_dimension_updates"
-        "[{item_id,dimension,status,document_refs|rationale}], then run "
-        "`.venv/bin/python scripts/apply_content_review_patch.py \"$MINUTES_JOB_DIR\"`. Retry freeze. If only "
-        "stale refs remain, allow one final helper patch/freeze without editing minutes.md. After a "
-        "failed patch, stop without rerunning freeze. Do not "
-        "open validator code or print/reread full artifacts or diffs.\n"
+        "completed. If freeze fails, stop and return only its bounded error. Do not inspect or patch "
+        "artifacts, rerun freeze, or reread evidence after that failure; the launcher has already "
+        "checkpointed the completed content turn and will start one isolated sidecar-only repair. "
+        "Do not open validator code or print/reread full artifacts or diffs.\n"
+    )
+
+
+def build_content_repair_prompt(
+    repo_root: Path,
+    job_dir: Path,
+    *,
+    validation_error: str,
+) -> str:
+    python_executable = repo_root / ".venv/bin/python"
+    patch_script = repo_root / "scripts/apply_content_repair_patch.py"
+    freeze_script = repo_root / "scripts/content_freeze.py"
+    patch_command = " ".join(
+        shlex.quote(str(value))
+        for value in (python_executable, patch_script, job_dir)
+    )
+    freeze_command = " ".join(
+        shlex.quote(str(value))
+        for value in (python_executable, freeze_script, job_dir)
+    )
+    error = _bounded_text(validation_error, max_chars=5_000)
+    return (
+        "Fresh content-repair worker; one bounded schema/section repair after a completed content "
+        "turn. Do not invoke a skill, use web search, or launch another worker.\n\n"
+        f"Repository: {repo_root}\nJob directory: {job_dir}\n"
+        f"Deterministic validation error (bounded): {error}\n\n"
+        "Do not read raw evidence, codex_minutes_input.md, evidence chunks/coverage, transcript, "
+        "OCR, screen text, snapshots, frames, media, worker metrics, validator source, tests, git "
+        "diffs, or instruction files. The recording analysis is complete. Inspect only the named "
+        "entries in content_inventory.json, document_blueprint.json, official_sources.json, "
+        "content_audit.json, content_quality_review.json and only an exact implicated H2 excerpt "
+        "from minutes.md. Keep every command result <=16KB; never concatenate or print a whole large "
+        "sidecar. Do not direct-edit minutes.md or any JSON sidecar.\n\n"
+        "Write only content_repair_patch.json with apply_patch. Exact patch shape: "
+        '{"schema_version":1,"json_updates":[{"file":"content_audit.json|'
+        'content_quality_review.json|document_blueprint.json|official_sources.json",'
+        '"path":["model_owned_field",0,"nested_key"],"value":"replacement JSON value"}],'
+        '"markdown_replacements":[{"old":"unique exact minutes text","new":'
+        '"evidence-preserving replacement","expected_count":1}]}. '
+        "Use an empty list for the unused update type. Keep the patch minimal; do not touch "
+        "validator-owned bindings, document_signals, hashes, reviewed chunks, density baselines, "
+        "inventory, or ledger. Existing intermediate JSON path components must exist; a missing "
+        "top-level model-owned field may be added.\n\n"
+        f"Canonical audit shape: {_content_audit_contract_fragment()}\n"
+        f"Canonical quality-review shape: {_quality_review_contract_fragment()}\n"
+        f"Canonical official-source shape: {_official_sources_contract_fragment()}\n"
+        "Blueprint form gate: grouped_bullets >=3 bullets; table/timeline uses a Markdown table; "
+        "checklist >=3 entries; definition_list >=2 labeled `label: value` lines; source_list has "
+        "a Markdown link; mixed has two distinct forms.\n\n"
+        f"Run the patch helper exactly once: `{patch_command}`. It validates all operations before "
+        "writing and emits only counts, never a diff. If it fails, stop. Run content_freeze.py "
+        f"exactly once after the helper: `{freeze_command}`. If freeze fails, report the bounded "
+        "error and stop; do not write another patch or rerun any model phase. Do not create a DOCX.\n"
     )
 
 
@@ -1520,7 +1878,7 @@ def build_fresh_codex_command(
 
 
 def phase_artifact_paths(job_dir: Path, phase: str) -> dict[str, Path]:
-    if phase not in FRESH_PHASES:
+    if phase not in SUPPORTED_FRESH_PHASES:
         raise ValueError(f"unsupported fresh Codex phase: {phase}")
     prefix = f"fresh_codex_{phase}"
     return {
@@ -1549,11 +1907,13 @@ def aggregate_phase_records(
     large_artifact_change_count = 0
     forbidden_instruction_read_count = 0
     forbidden_instruction_reads: list[dict[str, object]] = []
+    forbidden_artifact_write_count = 0
+    forbidden_artifact_writes: list[dict[str, object]] = []
     evidence_chunk_read_count = 0
     duplicate_evidence_chunk_read_count = 0
     duplicate_evidence_chunk_reads: list[dict[str, object]] = []
     elapsed_seconds = 0.0
-    for phase in FRESH_PHASES:
+    for phase in SUPPORTED_FRESH_PHASES:
         record = phase_records.get(phase, {})
         if not isinstance(record, Mapping) or record.get("state") in {"reused", "skipped"}:
             continue
@@ -1613,6 +1973,17 @@ def aggregate_phase_records(
                     forbidden_instruction_reads.append(
                         {"phase": phase, **dict(read)}
                     )
+            value = efficiency.get("forbidden_artifact_write_count", 0)
+            if isinstance(value, int):
+                forbidden_artifact_write_count += value
+            writes = efficiency.get("forbidden_artifact_writes", [])
+            if isinstance(writes, list):
+                for write in writes:
+                    if not isinstance(write, Mapping):
+                        continue
+                    forbidden_artifact_writes.append(
+                        {"phase": phase, **dict(write)}
+                    )
             value = efficiency.get("evidence_chunk_read_count", 0)
             if isinstance(value, int):
                 evidence_chunk_read_count += value
@@ -1661,6 +2032,10 @@ def aggregate_phase_records(
             "forbidden_instruction_reads": forbidden_instruction_reads[
                 :MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS
             ],
+            "forbidden_artifact_write_count": forbidden_artifact_write_count,
+            "forbidden_artifact_writes": forbidden_artifact_writes[
+                :MAX_RECORDED_TOOL_OUTPUT_VIOLATIONS
+            ],
             "evidence_chunk_read_count": evidence_chunk_read_count,
             "duplicate_evidence_chunk_read_count": (
                 duplicate_evidence_chunk_read_count
@@ -1671,6 +2046,7 @@ def aggregate_phase_records(
             "worker_contract_passed": (
                 oversized_tool_output_count == 0
                 and forbidden_instruction_read_count == 0
+                and forbidden_artifact_write_count == 0
                 and duplicate_evidence_chunk_read_count == 0
             ),
         },
@@ -1696,6 +2072,16 @@ def run_fresh_phase(
         events_path=paths["events"],
         stderr_path=paths["stderr"],
         progress_stream=progress_stream,
+        forbidden_command_markers=(
+            CONTENT_REPAIR_FORBIDDEN_COMMAND_MARKERS
+            if phase == "content_repair"
+            else ()
+        ),
+        allowed_file_change_names=(
+            (CONTENT_REPAIR_PATCH_NAME,)
+            if phase == "content_repair"
+            else None
+        ),
     )
     elapsed_seconds = round(time.perf_counter() - started, 3)
     record = {
@@ -1782,6 +2168,37 @@ def verify_completed_job(job_dir: Path) -> dict[str, object]:
     return status
 
 
+def reset_content_generation(job_dir: Path) -> None:
+    derived_names = {
+        *CONTENT_GENERATED_ARTIFACT_NAMES,
+        CONTENT_FREEZE_NAME,
+        CONTENT_CHECKPOINT_NAME,
+        CONTENT_REPAIR_PATCH_NAME,
+        "content_review_patch.json",
+        TRANSLATED_MINUTES_NAME,
+        TRANSLATION_MANIFEST_NAME,
+    }
+    for name in derived_names:
+        (job_dir / name).unlink(missing_ok=True)
+
+
+def ensure_content_freeze(
+    job_dir: Path,
+) -> tuple[dict[str, Any] | None, str | None]:
+    from scripts.content_freeze import create_content_freeze, validate_content_freeze
+
+    freeze_path = job_dir / CONTENT_FREEZE_NAME
+    if freeze_path.is_file():
+        try:
+            return validate_content_freeze(job_dir), None
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+    try:
+        return create_content_freeze(job_dir), None
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return None, _bounded_text(exc, max_chars=12_000)
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Complete one prepared minutes job in a clean ephemeral Codex context."
@@ -1816,6 +2233,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         choices=("low", "medium", "high", "xhigh", "max"),
         default=DEFAULT_TRANSLATION_REASONING_EFFORT,
         help="Reasoning effort for the single translation-only turn",
+    )
+    parser.add_argument(
+        "--force-content-rebuild",
+        action="store_true",
+        help=(
+            "Explicitly discard generated content/checkpoint artifacts and reread raw "
+            "evidence; required after the single bounded repair is exhausted"
+        ),
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -1853,7 +2278,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     if codex_binary is None:
         raise SystemExit("error: codex executable was not found on PATH")
     commands: dict[str, list[str]] = {}
-    for phase in planned_phases:
+    command_phases = tuple(dict.fromkeys((*planned_phases, "content_repair")))
+    for phase in command_phases:
         paths = phase_artifact_paths(job_dir, phase)
         commands[phase] = build_fresh_codex_command(
             codex_binary,
@@ -1877,9 +2303,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         "request_overrides": request_overrides,
         "ephemeral_session": True,
         "planned_ephemeral_session_count": len(planned_phases),
+        "maximum_ephemeral_session_count": len(planned_phases) + 1,
         "planned_phases": list(planned_phases),
+        "optional_phases": ["content_repair"],
         "phase_isolation": {
             "content_reads_raw_evidence": True,
+            "content_repair_reads_raw_evidence": False,
+            "content_repair_uses_bounded_patch_helper": True,
             "translation_reads_raw_evidence": False,
             "translation_reads_only_frozen_markdown": needs_translation,
             "delivery_reads_raw_evidence": False,
@@ -1899,18 +2329,20 @@ def main(argv: Sequence[str] | None = None) -> None:
             "stream_stall_exit_code": CODEX_STALL_EXIT_CODE,
             "tool_round_trip_targets": {
                 phase: TOOL_ROUND_TRIP_TARGETS[phase]
-                for phase in planned_phases
+                for phase in command_phases
             },
         },
         "parent_conversation_inherited": False,
         "raw_evidence_embedded_in_handoff": False,
         "handoff_prompt_bytes": {
             "content": len(content_prompt.encode("utf-8")),
+            "content_repair": None,
             "translation": None,
             "delivery": len(delivery_prompt.encode("utf-8")),
         },
         "handoff_prompt_sha256": {
             "content": hashlib.sha256(content_prompt.encode("utf-8")).hexdigest(),
+            "content_repair": None,
             "translation": None,
             "delivery": hashlib.sha256(delivery_prompt.encode("utf-8")).hexdigest(),
         },
@@ -1954,17 +2386,32 @@ def main(argv: Sequence[str] | None = None) -> None:
     phase_records: dict[str, Mapping[str, object]] = {}
     phase_checkpoints: list[dict[str, object]] = []
     try:
-        from scripts.content_freeze import validate_content_freeze
-
         freeze_path = job_dir / CONTENT_FREEZE_NAME
-        reuse_freeze = False
-        if freeze_path.is_file():
-            try:
-                validate_content_freeze(job_dir)
-                reuse_freeze = True
-            except ValueError:
-                reuse_freeze = False
-        if reuse_freeze:
+        if args.force_content_rebuild:
+            reset_content_generation(job_dir)
+        content_action = select_content_action(
+            job_dir,
+            content_prompt=content_prompt,
+            force_content_rebuild=args.force_content_rebuild,
+        )
+        if content_action == "checkpoint_invalid":
+            raise RuntimeError(
+                "content generation checkpoint is invalid; use "
+                "--force-content-rebuild for an explicit evidence reread"
+            )
+        if content_action == "checkpoint_mismatch":
+            raise RuntimeError(
+                "content prompt changed after the completed content turn; use "
+                "--force-content-rebuild for an explicit evidence reread"
+            )
+        if content_action == "repair_exhausted":
+            raise RuntimeError(
+                "the single bounded content repair is exhausted; refusing to repeat the "
+                "full content model turn automatically. Inspect the checkpoint or use "
+                "--force-content-rebuild"
+            )
+
+        if content_action == "reuse_freeze":
             phase_records["content"] = {
                 "state": "reused",
                 "content_freeze": file_record(freeze_path),
@@ -1976,7 +2423,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "elapsed_seconds": round(time.perf_counter() - started, 3),
                 }
             )
-        else:
+        elif content_action == "run_content":
             phase_checkpoints.append(
                 {
                     "phase": "content_started",
@@ -2012,7 +2459,146 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "elapsed_seconds": round(time.perf_counter() - started, 3),
                 }
             )
-        freeze = validate_content_freeze(job_dir)
+            write_content_generation_checkpoint(
+                job_dir,
+                content_prompt=content_prompt,
+                state="awaiting_validation",
+                repair_attempts=0,
+            )
+        else:
+            checkpoint_path = job_dir / CONTENT_CHECKPOINT_NAME
+            phase_records["content"] = {
+                "state": "reused",
+                "reason": "completed content turn checkpoint",
+                "content_checkpoint": file_record(checkpoint_path),
+                "elapsed_seconds": 0.0,
+            }
+            phase_checkpoints.append(
+                {
+                    "phase": "content_checkpoint_reused",
+                    "elapsed_seconds": round(time.perf_counter() - started, 3),
+                }
+            )
+
+        freeze, validation_error = ensure_content_freeze(job_dir)
+        if freeze is None:
+            assert validation_error is not None
+            checkpoint_status = inspect_content_generation_checkpoint(
+                job_dir,
+                content_prompt=content_prompt,
+            )
+            repair_attempts = int(checkpoint_status.get("repair_attempts", 0))
+            if repair_attempts >= MAX_CONTENT_REPAIR_ATTEMPTS:
+                raise RuntimeError(
+                    "the single bounded content repair is exhausted; refusing to repeat "
+                    "the full content model turn automatically"
+                )
+            write_content_generation_checkpoint(
+                job_dir,
+                content_prompt=content_prompt,
+                state="awaiting_repair",
+                repair_attempts=repair_attempts,
+                validation_error=validation_error,
+            )
+            repair_prompt = build_content_repair_prompt(
+                repo_root,
+                job_dir,
+                validation_error=validation_error,
+            )
+            repair_prompt_bytes = repair_prompt.encode("utf-8")
+            manifest["handoff_prompt_bytes"]["content_repair"] = len(
+                repair_prompt_bytes
+            )
+            manifest["handoff_prompt_sha256"]["content_repair"] = hashlib.sha256(
+                repair_prompt_bytes
+            ).hexdigest()
+            write_content_generation_checkpoint(
+                job_dir,
+                content_prompt=content_prompt,
+                state="repair_running",
+                repair_attempts=repair_attempts + 1,
+                validation_error=validation_error,
+            )
+            phase_checkpoints.append(
+                {
+                    "phase": "content_repair_started",
+                    "elapsed_seconds": round(time.perf_counter() - started, 3),
+                }
+            )
+            returncode, _repair_summary, repair_record = run_fresh_phase(
+                "content_repair",
+                command=commands["content_repair"],
+                prompt=repair_prompt,
+                env=child_env,
+                job_dir=job_dir,
+                progress_stream=sys.stderr,
+            )
+            phase_records["content_repair"] = repair_record
+            manifest["phases"] = dict(phase_records)
+            write_json(manifest_path, manifest)
+            if returncode != 0:
+                write_content_generation_checkpoint(
+                    job_dir,
+                    content_prompt=content_prompt,
+                    state="repair_failed",
+                    repair_attempts=repair_attempts + 1,
+                    validation_error=(
+                        "content repair phase violated the output/command guard"
+                        if returncode == TOOL_OUTPUT_BUDGET_EXIT_CODE
+                        else "content repair phase stalled"
+                        if returncode == CODEX_STALL_EXIT_CODE
+                        else f"content repair phase exited with status {returncode}"
+                    ),
+                )
+                if returncode == TOOL_OUTPUT_BUDGET_EXIT_CODE:
+                    raise RuntimeError(
+                        "fresh Codex content repair violated the output/command guard"
+                    )
+                if returncode == CODEX_STALL_EXIT_CODE:
+                    raise RuntimeError(
+                        "fresh Codex content repair stalled for 15 minutes without JSON events"
+                    )
+                raise RuntimeError(
+                    f"fresh Codex content repair exited with status {returncode}"
+                )
+            freeze, validation_error = ensure_content_freeze(job_dir)
+            if freeze is None:
+                assert validation_error is not None
+                write_content_generation_checkpoint(
+                    job_dir,
+                    content_prompt=content_prompt,
+                    state="repair_failed",
+                    repair_attempts=repair_attempts + 1,
+                    validation_error=validation_error,
+                )
+                raise RuntimeError(
+                    "content remains invalid after the single bounded repair: "
+                    + _bounded_console_text(validation_error)
+                )
+            write_content_generation_checkpoint(
+                job_dir,
+                content_prompt=content_prompt,
+                state="frozen",
+                repair_attempts=repair_attempts + 1,
+            )
+            phase_checkpoints.append(
+                {
+                    "phase": "content_repair_completed",
+                    "elapsed_seconds": round(time.perf_counter() - started, 3),
+                }
+            )
+        elif content_action != "reuse_freeze":
+            checkpoint_status = inspect_content_generation_checkpoint(
+                job_dir,
+                content_prompt=content_prompt,
+            )
+            write_content_generation_checkpoint(
+                job_dir,
+                content_prompt=content_prompt,
+                state="frozen",
+                repair_attempts=int(checkpoint_status.get("repair_attempts", 0)),
+            )
+
         phase_checkpoints.append(
             {
                 "phase": "content_verified",
