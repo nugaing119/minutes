@@ -65,13 +65,15 @@ low-freedom authoring contract that keeps weaker models from drifting into a chr
 an over-fragmented outline, or a citation-heavy audit report. Use `schema_version=1`,
 `status=completed`, and these top-level fields:
 
-- `document_archetype`: one of `technical_session_analysis`, `product_demo_analysis`,
+- `document_archetype`: one of `meeting_minutes`, `technical_session_analysis`, `product_demo_analysis`,
   `technical_decision_record`, `strategy_session_analysis`, or
   `general_recording_analysis`;
-- `document_type` and a concise `reader_goal`;
-- `front_matter`, with exact `key`, `label`, and `value` records for `source`,
-  `recording_datetime`, `duration`, `source_language`, `output_language`,
-  `evidence_basis`, and `external_evidence_policy`;
+- `document_type`, a concise `reader_goal`, and `writing_style`, which is
+  `meeting_minutes_objective` for actual meetings and `content_adaptive` otherwise;
+- `front_matter`, with exact `key`, `label`, and `value` records for
+  `recording_datetime` and `duration`, plus only reader-useful fields such as purpose or
+  participants when evidence supports them. Do not add source/output language, evidence-basis,
+  external-policy, model, skill, token, preprocessing, rendering, QA, hash, or internal-path fields;
 - ordered `sections`, each with a unique `id`, exact H2 `heading`, `role`, `form_factor`,
   `applicability`, and `primary_inventory_item_ids`. Use `rationale` when applicability is
   `not_applicable`.
@@ -91,6 +93,13 @@ The Markdown must implement the blueprint exactly:
 
 - put `문서 유형: ...` or `Document type: ...` immediately after the H1 and render every
   front-matter record as `- label: value` before the first H2;
+- for `meeting_minutes`, summarize rather than transcribe dialogue. Center the document on agenda
+  and context, key discussion, decisions and agreements, action owners and deadlines, follow-ups,
+  unresolved items, and risks. Korean minutes must use concise objective report prose with
+  consistent endings such as `~함`, `~하기로 함`, `~예정임`, and `~필요함`;
+- for every non-meeting archetype, use `content_adaptive` and choose a professional voice suited
+  to the actual document type. Do not force meeting-minutes endings onto analyses, demos, guides,
+  briefings, or training notes;
 - include exactly one executive synthesis with at least three grouped bullets;
 - assign every required inventory item to exactly one primary section;
 - use no more than six `topic_analysis` H2 groups; place related detail under H3 instead of
@@ -108,7 +117,7 @@ The Markdown must implement the blueprint exactly:
   external lookup. Keep `open_questions` and `external_evidence` as the final two H2s in that
   order. A `not_applicable` external section must display the exact sidecar reason, checked date,
   recording-first rule, and privacy non-transmission statement. A completed external section
-  adds the checked official links and separates transcription/OCR support from video conflicts.
+  adds the checked official links and separates recording support from video conflicts.
   Record `checked_at` as the actual timezone-aware check time, never a planned or future time;
   the freeze clock corrects only a same-day future skew and rejects other future dates.
 
@@ -120,7 +129,7 @@ substantive reader content between them, and keep substantive content after the 
 rationale when no Snapshot adds reader value; image count is never a substitute for evidence
 coverage.
 
-The useful reference-quality pattern is cover and document type → readable evidence metadata →
+The useful reference-quality pattern is cover and document type → useful reader metadata →
 executive synthesis → optional speaker/topic map → a few deep topic groups → operational
 checklist/timeline → unresolved verification → external evidence. This is a functional pattern,
 not a fixed title list, word count, or page target.
@@ -132,10 +141,12 @@ to skip the check. Internal decisions and POC measurements remain local verifica
 no authoritative public source applies. Numbering stays dynamic; only the final two functional
 headings and their order are fixed.
 
-Keep audit traceability in `content_inventory.json`, `content_audit.json`, and the evidence
-appendices. In the reader-facing body, raw `STT:`, `OCR:`, and `Snapshot:` strings are exceptions
-for genuinely contested claims, not paragraph suffixes. The deterministic allowance is the
-larger of two references or two per recorded source conflict; evidence appendices are excluded.
+Keep audit traceability in `content_inventory.json`, `content_audit.json`, and other internal
+sidecars. Never expose raw `STT:`, `OCR:`, or `Snapshot:` strings in the reader document, including
+appendices. Do not mention internal artifact filenames, job paths, hashes, model/tool/token usage,
+preprocessing stages, render attempts, or QA mechanics. Use natural reader-facing captions for
+embedded images and describe privacy as recording-content non-transmission, not as an STT/OCR
+pipeline report.
 
 ## 4. Choose the document archetype and form factors from the recording
 
@@ -147,9 +158,8 @@ guidance.
 
 Use tables only for comparable rows. Use timelines, checklists, decision grids, or grouped
 bullets when they improve retrieval. Keep the executive summary concise without compressing
-the substantive body. Integrate timestamp evidence naturally; avoid repeating raw
-`근거: STT... OCR... Snapshot...` lines after every paragraph when compact citations or a
-dedicated evidence structure reads better.
+the substantive body. Keep timestamp traceability in internal sidecars; never render raw
+`근거: STT... OCR... Snapshot...` lines in the reader document.
 
 ## 5. Run an adversarial draft review
 
@@ -157,6 +167,9 @@ After writing `minutes.md`, compare it against the ledger and inventory. Review 
 classes: `overcompression`, `inventory_granularity`, `question_answer_retention`,
 `conditions_exceptions_risks`, `document_archetype_fit`, `evidence_citation_usability`,
 `visual_evidence_plan`, and `reader_usability`.
+
+`document_archetype_fit` includes voice fit: actual meetings use objective minutes and Korean
+report endings, while non-meeting documents use a type-appropriate professional voice.
 
 Create `content_quality_review.json` with:
 

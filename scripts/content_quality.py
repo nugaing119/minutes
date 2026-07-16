@@ -40,11 +40,16 @@ MODEL_FINAL_CHECKS = (
     "reader_usability",
 )
 BLUEPRINT_ARCHETYPES = {
+    "meeting_minutes",
     "technical_session_analysis",
     "product_demo_analysis",
     "technical_decision_record",
     "strategy_session_analysis",
     "general_recording_analysis",
+}
+BLUEPRINT_WRITING_STYLES = {
+    "meeting_minutes_objective",
+    "content_adaptive",
 }
 BLUEPRINT_ROLES = {
     "executive_synthesis",
@@ -68,12 +73,12 @@ TRUST_SECTION_HEADINGS = {
 }
 TRUST_APPENDIX_DISCLOSURES = {
     "ko": (
-        "영상 발언을 문서의 기준으로 유지하며, 외부 자료가 사용되더라도 모호성 보강과 충돌 확인에만 제한한다.",
-        "원문 STT·OCR과 참석자·고객·내부 식별정보는 외부 검색에 전송하지 않았다.",
+        "영상 발언을 문서의 기준으로 유지하며, 외부 자료는 모호성 보강과 충돌 확인에만 사용함.",
+        "녹화 원문과 참석자·고객·내부 식별정보를 외부 검색에 전송하지 않음.",
     ),
     "en": (
         "The recording remains the source of truth; any external evidence is limited to clarifying ambiguity or documenting conflicts.",
-        "No raw STT/OCR, participant, customer, or internal identifiers were sent to external search.",
+        "No recording content, participant, customer, or internal identifiers were sent to external search.",
     ),
 }
 BLUEPRINT_FORM_FACTORS = {
@@ -87,13 +92,18 @@ BLUEPRINT_FORM_FACTORS = {
     "source_list",
 }
 REQUIRED_FRONT_MATTER_KEYS = {
-    "source",
     "recording_datetime",
     "duration",
+}
+FORBIDDEN_FRONT_MATTER_KEYS = {
     "source_language",
     "output_language",
     "evidence_basis",
     "external_evidence_policy",
+    "process_metrics",
+    "skill",
+    "model",
+    "worker",
 }
 ACTION_CATEGORIES = {
     "action",
@@ -114,11 +124,25 @@ OPEN_QUESTION_CATEGORIES = {
     "uncertainty",
 }
 RAW_EVIDENCE_REF_RE = re.compile(r"\b(?:STT|OCR|Snapshot):", re.I)
+INTERNAL_WORKFLOW_REFERENCE_RE = re.compile(
+    r"\b(?:process_metrics|content_freeze|content_quality_review|fresh_codex_handoff|"
+    r"worker_runtime_summary|evidence_coverage|docx_qa)\.json\b|"
+    r"\b(?:run_fresh_codex_job|process_file|finalize_docx)\.py\b|"
+    r"\b(?:OCR_WORKERS|OCR_FFMPEG_THREADS|OCR_PRESTART_COOLDOWN_SECONDS|"
+    r"worker_contract_passed)\b",
+    re.I,
+)
+KOREAN_REPORT_ENDING_RE = re.compile(
+    r"(?:함|됨|임|음|예정|필요|완료|보류|미정|진행 중|검토 중|확인 중|대기 중)$"
+)
+KOREAN_NARRATIVE_ENDING_RE = re.compile(
+    r"(?:습니다|입니다|했습니다|하였다|했다|한다|된다|이다|있다|없다|필요하다|예정이다)$"
+)
 MARKDOWN_IMAGE_RE = re.compile(r"^!\[[^\]]*\]\((?P<path>[^)]+)\)\s*$")
 MARKDOWN_TABLE_SEPARATOR_RE = re.compile(
     r"^\|(?:\s*:?-{3,}:?\s*\|)+\s*$"
 )
-QUALITY_CONTRACT_VERSION = 2
+QUALITY_CONTRACT_VERSION = 3
 REQUIRED_ITEM_DIMENSIONS = (
     "core_facts",
     "conditions_exceptions",
@@ -136,6 +160,55 @@ DENSITY_REVISION_DEFICIT_RECOVERY_RATIO = 0.80
 DENSITY_REVISION_MIN_TOTAL_GAIN = 400
 DENSITY_REVISION_MAX_REQUIRED_GAIN = 1_800
 VISUAL_PLAN_STATUSES = {"embedded", "limited", "not_applicable"}
+
+
+def korean_meeting_report_style_issues(markdown: str) -> list[str]:
+    """Return concise style failures for Korean meeting-minutes prose."""
+    candidates: list[str] = []
+    in_code_fence = False
+    for raw_line in markdown.splitlines():
+        line = raw_line.strip()
+        if line.startswith("```"):
+            in_code_fence = not in_code_fence
+            continue
+        if (
+            in_code_fence
+            or not line
+            or line.startswith("#")
+            or line.startswith("|")
+            or MARKDOWN_IMAGE_RE.match(line)
+            or re.match(r"^(?:[-*]\s+)?[^:]{1,30}:\s+", line)
+        ):
+            continue
+        line = re.sub(r"^[-*+]\s+", "", line)
+        line = re.sub(r"^\d+[.)]\s+", "", line)
+        for sentence in re.split(r"[.!?。]+", line):
+            sentence = sentence.strip().rstrip(";:")
+            if len(re.findall(r"[가-힣]", sentence)) >= 5:
+                candidates.append(sentence)
+    if not candidates:
+        return []
+    narrative = [
+        sentence
+        for sentence in candidates
+        if KOREAN_NARRATIVE_ENDING_RE.search(sentence)
+    ]
+    report_count = sum(
+        bool(KOREAN_REPORT_ENDING_RE.search(sentence)) for sentence in candidates
+    )
+    required_report_count = max(1, math.ceil(len(candidates) * 0.6))
+    issues: list[str] = []
+    if narrative:
+        issues.append(
+            "Korean meeting minutes contain narrative/polite sentence endings instead of "
+            "objective report style"
+        )
+    if report_count < required_report_count:
+        issues.append(
+            "Korean meeting minutes must consistently end substantive prose with concise "
+            "report forms such as ~함, ~하기로 함, ~예정임, or ~필요함"
+        )
+    return issues
 
 
 def validate_content_quality_artifacts(
@@ -352,6 +425,22 @@ def _validate_blueprint(
         issues.append("document_blueprint.json document_type is required")
     if not _nonempty_string(blueprint.get("reader_goal")):
         issues.append("document_blueprint.json reader_goal is required")
+    writing_style = _nonempty_string(blueprint.get("writing_style"))
+    if quality_contract_version >= 3 and writing_style not in BLUEPRINT_WRITING_STYLES:
+        issues.append(
+            "document_blueprint.json writing_style must be one of "
+            f"{sorted(BLUEPRINT_WRITING_STYLES)}"
+        )
+    elif archetype == "meeting_minutes" and writing_style != (
+        "meeting_minutes_objective"
+    ):
+        issues.append(
+            "meeting_minutes requires writing_style=meeting_minutes_objective"
+        )
+    elif archetype != "meeting_minutes" and writing_style != "content_adaptive":
+        issues.append(
+            "non-meeting documents require writing_style=content_adaptive"
+        )
 
     preamble, rendered_sections = _split_h2_sections(minutes_text)
     h1_matches = re.findall(r"(?m)^#[ \t]+(.+?)\s*$", minutes_text)
@@ -385,6 +474,13 @@ def _validate_blueprint(
             if key in seen_front_keys:
                 issues.append(f"duplicate document blueprint front-matter key: {key}")
             seen_front_keys.add(key)
+            if (
+                quality_contract_version >= 3
+                and key.lower() in FORBIDDEN_FRONT_MATTER_KEYS
+            ):
+                issues.append(
+                    f"{label} exposes internal production metadata: {key}"
+                )
             expected_line = f"- {display_label}: {value}"
             if expected_line not in preamble:
                 issues.append(f"{label} was not found verbatim in minutes.md front matter")
@@ -408,7 +504,6 @@ def _validate_blueprint(
     conflict_count = len(inventory.get("conflicts", [])) if isinstance(
         inventory.get("conflicts"), list
     ) else 0
-
     sections = blueprint.get("sections")
     if not isinstance(sections, list) or not sections:
         issues.append("document_blueprint.json sections must be a non-empty list")
@@ -419,7 +514,6 @@ def _validate_blueprint(
     role_counts: Counter[str] = Counter()
     primary_assignment: Counter[str] = Counter()
     blueprint_headings: list[str] = []
-    reader_body_raw_refs = 0
     action_section_applicability: str | None = None
     open_section_applicability: str | None = None
     external_section_applicability: str | None = None
@@ -513,9 +607,6 @@ def _validate_blueprint(
                 f"{label}.heading must use the canonical {role} heading: "
                 f"{sorted(TRUST_SECTION_HEADINGS[role].values())}"
             )
-        if role not in {"evidence_appendix", "external_evidence"}:
-            reader_body_raw_refs += len(RAW_EVIDENCE_REF_RE.findall(section_text))
-
     rendered_headings = list(rendered_sections)
     if blueprint_headings != rendered_headings:
         issues.append(
@@ -616,14 +707,33 @@ def _validate_blueprint(
             "open_questions cannot be not_applicable when official verification remains unresolved"
         )
 
-    raw_ref_allowance = max(2, conflict_count * 2)
-    if reader_body_raw_refs > raw_ref_allowance:
+    raw_ref_count = len(RAW_EVIDENCE_REF_RE.findall(minutes_text))
+    legacy_raw_ref_allowance = max(2, conflict_count * 2)
+    if quality_contract_version >= 3 and raw_ref_count:
+        issues.append(
+            "reader document must not expose raw STT/OCR/Snapshot references; keep "
+            "traceability in internal sidecars"
+        )
+    elif quality_contract_version < 3 and raw_ref_count > legacy_raw_ref_allowance:
         issues.append(
             "reader-facing body contains too many raw STT/OCR/Snapshot references: "
-            f"{reader_body_raw_refs} > {raw_ref_allowance}; keep traceability in sidecars "
-            "and evidence appendices"
+            f"{raw_ref_count} > {legacy_raw_ref_allowance}"
         )
-    summary["reader_body_raw_evidence_refs"] = reader_body_raw_refs
+    internal_workflow_refs = sorted(
+        set(INTERNAL_WORKFLOW_REFERENCE_RE.findall(minutes_text))
+    )
+    if quality_contract_version >= 3 and internal_workflow_refs:
+        issues.append(
+            "reader document exposes internal workflow artifacts or settings: "
+            f"{internal_workflow_refs}"
+        )
+    if (
+        quality_contract_version >= 3
+        and writing_style == "meeting_minutes_objective"
+        and re.search(r"[가-힣]", minutes_text)
+    ):
+        issues.extend(korean_meeting_report_style_issues(minutes_text))
+    summary["reader_body_raw_evidence_refs"] = raw_ref_count
     summary["document_signals"] = deterministic_document_signals(
         job_dir,
         minutes_text,
@@ -1386,7 +1496,7 @@ def _validate_review(
         issues.append("content_quality_review.json schema_version must be 2 or 3")
     if quality_contract_version >= 2 and schema_version != 3:
         issues.append(
-            "quality contract v2 requires content_quality_review.json schema_version 3"
+            "quality contract v2+ requires content_quality_review.json schema_version 3"
         )
     if review.get("status") != "passed":
         issues.append("content_quality_review.json status must be passed")

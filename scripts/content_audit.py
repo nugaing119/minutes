@@ -48,6 +48,13 @@ def content_fidelity_instruction(
         "최종 문서 본문의 기준은 영상에서 실제로 전달된 내용입니다. 외부 문서의 현재 "
         "정보를 이용해 영상의 명확한 발언을 수정·대체하거나, 영상에서 말하지 않은 현재 "
         "사실을 영상 내용처럼 섞지 마세요.",
+        "실제 회의는 대화식 받아쓰기가 아니라 안건·핵심 논의·결정/합의·담당자/기한·"
+        "후속조치·미해결 항목·위험 중심으로 정리하세요. 한국어 회의록은 `~함`, "
+        "`~하기로 함`, `~예정임`, `~필요함` 계열의 객관적 보고체를 일관되게 "
+        "사용하세요. 회의가 아닌 문서는 실제 유형에 맞는 전문 문체를 사용하세요.",
+        "최종 독자 문서에는 raw STT/OCR/Snapshot ref, skill/model/token, 전처리·렌더·QA "
+        "기록, 내부 파일명·경로·해시를 넣지 마세요. source_refs와 처리 기록은 job 내부 "
+        "sidecar에만 남기세요.",
         "원문이 한 번에 읽기에는 길면 시간 구간별로 순차 처리해 누적 inventory를 "
         "만드세요. 구간을 서술형 부분 요약으로 바꾼 뒤 그 요약들을 다시 요약하지 "
         "마세요. context 한계는 처리 순서를 나누는 이유일 뿐 최종 내용 생략이나 "
@@ -134,10 +141,11 @@ def content_fidelity_instruction(
                 f"`{TRUST_APPENDIX_DISCLOSURES['ko'][1]}`; 영어 "
                 f"`{TRUST_APPENDIX_DISCLOSURES['en'][0]}` / "
                 f"`{TRUST_APPENDIX_DISCLOSURES['en'][1]}`.",
-                "공식 문서를 이용했다면 내부에서 `전사·OCR 보강 근거`와 "
-                "`영상 내용과 상충하는 근거`를 구분하고, 각 항목에 영상 내용과 timestamp, "
-                "조사 목적, 확인 결과, 차이 또는 보강한 표현, 확인일, 공식 Markdown 링크를 "
-                "함께 적으세요. 외부 확인 섹션 뒤에는 다른 H2를 추가하지 마세요.",
+                "공식 문서를 이용했다면 sidecar에서는 전사/OCR 보강과 영상 충돌을 구분하되, "
+                "독자 문서에는 `녹화 내용 보강 근거`와 `영상 내용과 상충하는 근거`처럼 "
+                "자연스러운 제목을 사용하세요. 조사 목적, 확인 결과, 차이 또는 보강한 표현, "
+                "확인일, 공식 Markdown 링크를 적고 STT/OCR/skill 처리 과정은 표시하지 마세요. "
+                "외부 확인 섹션 뒤에는 다른 H2를 추가하지 마세요.",
                 "같은 job 폴더에 official_sources.json을 작성하세요. schema_version=1, "
                 "status(completed|not_applicable), 실제 현재 시각의 timezone-aware checked_at "
                 "(미래 시각 금지), policy=official_only, "

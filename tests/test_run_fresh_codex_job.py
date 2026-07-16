@@ -140,7 +140,12 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertIn("required_item_checks", prompt)
         self.assertIn("never `checks`", prompt)
         self.assertIn("revised cycle owns nonempty findings, changes, and target_section_ids", prompt)
-        self.assertIn("raw STT/OCR/Snapshot refs outside evidence appendices <=2", prompt)
+        self.assertIn("Do not expose raw STT/OCR/Snapshot refs anywhere", prompt)
+        self.assertIn("writing_style=meeting_minutes_objective", prompt)
+        self.assertIn("~하기로 함", prompt)
+        self.assertIn("writing_style=content_adaptive", prompt)
+        self.assertIn("Front matter is reader metadata, not a production log", prompt)
+        self.assertIn("render attempts, or QA mechanics", prompt)
         self.assertIn("source_list needs a real Markdown link", prompt)
         self.assertIn("exact substring of that primary H2", prompt)
         self.assertIn("inspect only the named JSON entries and H2 sections", prompt)
@@ -209,7 +214,9 @@ class FreshCodexJobTests(unittest.TestCase):
         self.assertIn("no tool calls", prompt)
         self.assertIn("numeric values", prompt)
         self.assertIn(source.strip(), prompt)
-        self.assertIn("Set the output-language metadata value to 한국어", prompt)
+        self.assertIn("legacy source already contains an Output language", prompt)
+        self.assertIn("objective Korean report style", prompt)
+        self.assertIn("Do not add source/output-language", prompt)
         self.assertIn("## 추가 검증이 필요한 항목", prompt)
         self.assertIn("## 외부 근거 확인", prompt)
 
@@ -464,7 +471,7 @@ class FreshCodexJobTests(unittest.TestCase):
             )
 
         self.assertEqual(manifest["chunk_count"], 3)
-        self.assertEqual(manifest["quality_contract_version"], 2)
+        self.assertEqual(manifest["quality_contract_version"], 3)
         self.assertEqual(
             [
                 (item["start_line"], item["end_line"])

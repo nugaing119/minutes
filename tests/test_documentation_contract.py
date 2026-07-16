@@ -91,6 +91,20 @@ class DocumentationContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.plan)
 
+    def test_docs_select_voice_by_document_type_and_hide_production_logs(self) -> None:
+        for relative_path in ("README.md", "INSTALL_USAGE.md", "PLAN.md"):
+            content = self.primary_docs[relative_path]
+            with self.subTest(path=relative_path):
+                self.assertIn("~하기로 함", content)
+                self.assertIn("STT/OCR/Snapshot", content)
+                self.assertNotIn("원문 STT/OCR·개인", content)
+
+        skill = self.primary_docs["codex/skills/minutes/SKILL.md"]
+        self.assertIn("meeting_minutes", skill)
+        self.assertIn("content_adaptive", skill)
+        self.assertIn("reader deliverables, not production logs", skill)
+        self.assertIn("production logs out of reader deliverables", self.skill_agent_metadata)
+
     def test_docs_require_traceable_video_and_docx_evidence(self) -> None:
         for relative_path, content in self.primary_docs.items():
             with self.subTest(path=relative_path):

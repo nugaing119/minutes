@@ -27,6 +27,18 @@ repository. Do not assume the input is a meeting.
   `회의록`, `Meeting Minutes`, `영상 요약`, or meeting-only sections. Do not impose fixed
   word, token, page, or bullet targets. Use the quality-loop blueprint gate to reject avoidable
   top-level fragmentation while preserving content-driven H3 depth.
+- When the recording is actually a meeting, use the `meeting_minutes` archetype and concise,
+  objective minutes rather than a dialogue transcript. Center the document on agenda/context,
+  key discussion, decisions/agreements, owners/deadlines, follow-ups, unresolved items, and risks.
+  Korean meeting prose must consistently use report endings such as `~함`, `~하기로 함`,
+  `~예정임`, and `~필요함`. For every non-meeting document, select `content_adaptive` and use
+  the professional voice appropriate to its actual type; do not force meeting-minutes endings.
+- Treat the final Markdown and DOCX as reader deliverables, not production logs. Keep only useful
+  metadata such as recording/meeting time, duration, purpose, and evidence-supported participants.
+  Never expose raw `STT:`, `OCR:`, or `Snapshot:` refs, internal artifact filenames or paths,
+  hashes, model/tool/token usage, skill execution, preprocessing stages, render attempts, or QA
+  mechanics. Keep all traceability and performance records in job-local sidecars. Give embedded
+  images natural captions instead of internal Snapshot identifiers.
 - Use `SPEAKER_ATTRIBUTION_MODE=evidence` and
   `SPEAKER_ATTRIBUTION_REQUIRED=false`. `audio` and `hybrid` are forbidden in the automatic
   workflow.
@@ -85,8 +97,9 @@ repository. Do not assume the input is a meeting.
   `OCR_MAX_SNAPSHOT_GAP_SECONDS` (default 120). Review `visual_only`, `speaker_ui_change`, and
   `forced_coverage` frames when material. Use resolvable refs in the exact forms
   `STT:HH:MM:SS-HH:MM:SS`, `OCR:HH:MM:SS`, and
-  `Snapshot:snapshot-NNNN@HH:MM:SS`. A required item supported only by visual evidence must
-  include a Snapshot ref.
+  `Snapshot:snapshot-NNNN@HH:MM:SS` in internal inventory/audit sidecars only. A required item
+  supported only by visual evidence must include a Snapshot ref in those sidecars, never in the
+  reader document.
 - With `CONTENT_AUDIT_MODE=strict`, create `content_inventory.json` before drafting and
   `content_audit.json` after drafting. Preserve dates, versions, quantities, ranges, units,
   conditions, exceptions, negation, limitations, Q&A, and source conflicts. Do not archive
@@ -159,10 +172,11 @@ repository. Do not assume the input is a meeting.
   numbering follow the preceding dynamic topic sections; do not hardcode section numbers.
   Keep both H2s when either result is `not_applicable`, displaying the concrete reason and
   checked date instead of deleting the trust control. The external section must also state
-  that the recording remains authoritative and that raw STT/OCR and personal/internal
-  identifiers were not sent to external search. When official sources were used, separate
-  transcription/OCR support from evidence that conflicts with the video and include timestamp,
-  purpose, finding, checked date, and official links. No H2 section may follow it.
+  that the recording remains authoritative and that recording content and personal/internal
+  identifiers were not sent to external search. Do not describe the STT/OCR/skill pipeline in the
+  reader document. When official sources were used, separate recording-content support from
+  evidence that conflicts with the video and include purpose, finding, checked date, and official
+  links. No H2 section may follow it.
 
 ## Standard Commands
 
@@ -196,7 +210,7 @@ Inside the content worker, read `evidence_coverage_summary.json`, then every byt
 Snapshots necessary for evidence resolution. In strict mode, write `content_inventory.json`,
 `evidence_ledger.json`, `document_blueprint.json`, `official_sources.json`, `minutes.md`,
 `content_audit.json`, and `content_quality_review.json` in the quality-loop order. The blueprint
-must make the cover document type, evidence metadata, functional H2 roles, primary inventory
+must make the cover document type, reader-useful metadata, writing style, functional H2 roles, primary inventory
 placement, form factors, operational utility, reader-facing evidence placement, and a 3-5 core
 image plan explicit when Snapshots add reader value. Never place full-width images adjacently or
 leave the final image as the document's last substantive block. Write the eight model-judged

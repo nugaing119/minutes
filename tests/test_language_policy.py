@@ -39,9 +39,13 @@ class FakeProvider:
 class LanguagePolicyTests(unittest.TestCase):
     def test_korean_is_explicit_only_at_requested_final_output(self) -> None:
         instruction = language_instruction("ko")
+        system_prompt = build_system_prompt("ko")
         self.assertIn("최종 문서", instruction)
         self.assertIn("한국어", instruction)
         self.assertIn("원문 언어를 유지", build_system_prompt("auto"))
+        self.assertIn("~하기로 함", system_prompt)
+        self.assertIn("회의가 아닌 기술 분석", system_prompt)
+        self.assertIn("최종 독자 문서에는 STT/OCR/Snapshot", system_prompt)
 
     def test_codex_prompt_preserves_english_evidence_and_requests_korean(self) -> None:
         prompt = build_codex_minutes_input(
@@ -88,8 +92,10 @@ class LanguagePolicyTests(unittest.TestCase):
         self.assertIn("누적 inventory", prompt)
         self.assertIn("다시 요약하지", prompt)
         self.assertIn("영상에서 실제로 전달된 내용", prompt)
-        self.assertIn("전사·OCR 보강 근거", prompt)
+        self.assertIn("녹화 내용 보강 근거", prompt)
         self.assertIn("영상 내용과 상충하는 근거", prompt)
+        self.assertIn("~하기로 함", prompt)
+        self.assertIn("job 내부 sidecar", prompt)
         self.assertNotIn("3~8개", prompt)
 
     def test_evidence_codex_prompt_resolves_only_from_timed_evidence(self) -> None:

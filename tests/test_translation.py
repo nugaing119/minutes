@@ -146,6 +146,36 @@ class TranslationManifestTests(unittest.TestCase):
 
         self.assertTrue(checks["structure_preserved"])
 
+    def test_korean_meeting_translation_requires_objective_report_style(self) -> None:
+        source = (
+            "# Meeting result\n\n"
+            "## Decisions\n\n"
+            "- The manager shared the revised schedule.\n"
+            "- The team agreed to confirm the deadline.\n"
+        )
+        good = (
+            "# 회의 결과\n\n"
+            "## 결정 사항\n\n"
+            "- 담당자가 수정 일정을 공유함.\n"
+            "- 팀에서 마감 기한을 확정하기로 함.\n"
+        )
+        bad = good.replace("수정 일정을 공유함", "수정 일정을 공유했습니다")
+
+        checks = validate_translation_text(
+            source,
+            good,
+            target_language="ko",
+            writing_style="meeting_minutes_objective",
+        )
+        self.assertEqual(checks["document_voice"], "passed")
+        with self.assertRaisesRegex(ValueError, "objective report style"):
+            validate_translation_text(
+                source,
+                bad,
+                target_language="ko",
+                writing_style="meeting_minutes_objective",
+            )
+
     def test_missing_numeric_literal_is_rejected_without_model_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             job = self._job(Path(temp_dir))

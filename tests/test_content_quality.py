@@ -14,6 +14,7 @@ from scripts.content_quality import (
     _section_form_signals,
     _validate_form_factor,
     finalize_compact_review,
+    korean_meeting_report_style_issues,
     validate_content_quality_artifacts,
 )
 from scripts.utils import write_json
@@ -101,18 +102,6 @@ def write_quality_artifacts(job_dir: Path) -> tuple[set[str], set[str], str]:
             "value": "2026-07-15 10:00",
         },
         {"key": "duration", "label": "Duration", "value": "10 minutes"},
-        {"key": "source_language", "label": "Source language", "value": "English"},
-        {"key": "output_language", "label": "Output language", "value": "English"},
-        {
-            "key": "evidence_basis",
-            "label": "Evidence basis",
-            "value": "Timestamped STT and OCR",
-        },
-        {
-            "key": "external_evidence_policy",
-            "label": "External evidence policy",
-            "value": "Recording first",
-        },
     ]
     minutes_text = (
         "# Detailed report\n\n"
@@ -147,6 +136,7 @@ def write_quality_artifacts(job_dir: Path) -> tuple[set[str], set[str], str]:
             "document_archetype": "technical_session_analysis",
             "document_type": "Technical session analysis",
             "reader_goal": "Understand the conditions and act on them.",
+            "writing_style": "content_adaptive",
             "front_matter": front_matter,
             "visual_evidence_plan": {
                 "status": "not_applicable",
@@ -414,7 +404,96 @@ class ContentQualityTests(unittest.TestCase):
                 issues=issues,
             )
 
-        self.assertTrue(any("too many raw STT/OCR/Snapshot" in x for x in issues))
+        self.assertTrue(any("must not expose raw STT/OCR/Snapshot" in x for x in issues))
+
+    def test_reader_document_rejects_internal_workflow_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
+            exposed_text = minutes_text.replace(
+                "- The first condition matters.",
+                "- The first condition matters. See content_freeze.json.",
+            )
+            issues: list[str] = []
+
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=exposed_text,
+                issues=issues,
+            )
+
+        self.assertTrue(any("internal workflow artifacts" in issue for issue in issues))
+
+    def test_korean_meeting_minutes_use_objective_report_endings(self) -> None:
+        good = (
+            "# 회의 결과\n\n"
+            "## 주요 논의\n\n"
+            "김 대리가 신규 일정안을 공유함.\n"
+            "개발 일정은 8월 10일까지 확정하기로 함.\n"
+            "고객사 요청사항을 반영한 수정본이 필요함.\n"
+            "수정본은 이 과장이 7월 31일까지 전달할 예정임.\n"
+        )
+        bad = (
+            "# 회의 결과\n\n"
+            "## 주요 논의\n\n"
+            "김 대리가 신규 일정안을 공유했습니다.\n"
+            "개발 일정은 8월 10일까지 확정한다.\n"
+        )
+
+        self.assertEqual(korean_meeting_report_style_issues(good), [])
+        self.assertTrue(korean_meeting_report_style_issues(bad))
+
+    def test_meeting_blueprint_requires_objective_writing_style(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
+            blueprint = json.loads(
+                (job_dir / "document_blueprint.json").read_text(encoding="utf-8")
+            )
+            blueprint["document_archetype"] = "meeting_minutes"
+            write_json(job_dir / "document_blueprint.json", blueprint)
+            issues: list[str] = []
+
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=minutes_text,
+                issues=issues,
+            )
+
+        self.assertTrue(
+            any("meeting_minutes requires writing_style" in issue for issue in issues)
+        )
+
+    def test_front_matter_rejects_production_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job_dir = Path(temp_dir)
+            inventory_ids, required_ids, minutes_text = write_quality_artifacts(job_dir)
+            blueprint = json.loads(
+                (job_dir / "document_blueprint.json").read_text(encoding="utf-8")
+            )
+            blueprint["front_matter"].append(
+                {"key": "output_language", "label": "Output language", "value": "English"}
+            )
+            exposed_text = minutes_text.replace(
+                "\n\n## Key messages",
+                "\n- Output language: English\n\n## Key messages",
+            )
+            write_json(job_dir / "document_blueprint.json", blueprint)
+            issues: list[str] = []
+
+            validate_content_quality_artifacts(
+                job_dir,
+                inventory_ids=inventory_ids,
+                required_ids=required_ids,
+                minutes_text=exposed_text,
+                issues=issues,
+            )
+
+        self.assertTrue(any("internal production metadata" in issue for issue in issues))
 
     def test_front_matter_requires_explicit_document_type(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

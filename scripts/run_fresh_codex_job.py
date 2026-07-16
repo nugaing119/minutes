@@ -26,6 +26,7 @@ from scripts.content_quality import (
     BLUEPRINT_ARCHETYPES,
     BLUEPRINT_FORM_FACTORS,
     BLUEPRINT_ROLES,
+    BLUEPRINT_WRITING_STYLES,
     LEDGER_CLASSIFICATIONS,
     MODEL_FINAL_CHECKS,
     QUALITY_CONTRACT_VERSION,
@@ -1221,6 +1222,7 @@ def build_fresh_prompt(
     blueprint_archetypes = "|".join(sorted(BLUEPRINT_ARCHETYPES))
     blueprint_roles = "|".join(sorted(BLUEPRINT_ROLES))
     blueprint_forms = "|".join(sorted(BLUEPRINT_FORM_FACTORS))
+    blueprint_writing_styles = "|".join(sorted(BLUEPRINT_WRITING_STYLES))
     front_matter_keys = "|".join(sorted(REQUIRED_FRONT_MATTER_KEYS))
     model_final_checks = "|".join(MODEL_FINAL_CHECKS)
     required_item_dimensions = "|".join(REQUIRED_ITEM_DIMENSIONS)
@@ -1275,7 +1277,8 @@ def build_fresh_prompt(
         "time_range, category, statement, importance(required|optional), qualifier, source_refs[], "
         "official_verification(required|not_applicable). Conflicts use id,description,source_refs for both sides.\n"
         f"- reader-facing document blueprint document_blueprint.json: schema_version=1, status=completed, "
-        f"document_archetype({blueprint_archetypes}), document_type, reader_goal, front_matter[], "
+        f"document_archetype({blueprint_archetypes}), document_type, reader_goal, "
+        f"writing_style({blueprint_writing_styles}), front_matter[], "
         f"sections[]. Required front-matter keys are {front_matter_keys}; each entry has key,label,value "
         "and its `- label: value` line must be verbatim in minutes.md. Each section has id, heading, "
         f"role({blueprint_roles}), form_factor({blueprint_forms}), applicability(required|not_applicable), "
@@ -1286,37 +1289,38 @@ def build_fresh_prompt(
         "`External Evidence Check` (English) or `추가 검증이 필요한 항목`, `외부 근거 확인` "
         "(Korean); keep both if not_applicable. mixed needs two of "
         "prose/bullets/table/image; source_list needs a real Markdown link.\n"
-        "  visual_evidence_plan{status(embedded|limited|not_applicable),rationale,"
-        "items[{snapshot_path,section_id,purpose,reader_value}]}; embedded=3-5 distinct core "
-        "images, limited only when <3 exist; exact Markdown order, <=2/H2, no adjacent "
-        "full-width images, and content after the last image.\n"
-        "- content_audit.json: schema_version=1, status=passed, covered_item_ids, missing_item_ids=[], "
-        "qualifier_changes=[], silent_conflicts=[], documented_conflict_ids, coverage[{item_id,"
-        "document_refs:[unique verbatim minutes text]}], conflict_coverage with conflict_id, "
-        "recording_fidelity{preserved_item_ids,rewritten_by_external_source_item_ids:[]}, and "
-        "intentional_omissions[]. Every required item must be covered and evidenced.\n"
-        "Keep reader-facing raw STT/OCR/Snapshot refs outside evidence appendices <=2; sidecars own detailed traceability.\n"
-        f"- content_quality_review.json: schema_version=3,status=passed,review_cycles "
-        f"{{cycle:1,status:passed,findings:[],changes:[]}}, final_checks exactly "
-        f"{model_final_checks}, each passed with a finding. required_item_checks uses exactly "
-        "item_id, section_id, dimensions (never `checks`, inventory_item_id, or primary_section_id). "
-        f"dimensions contains exactly {required_item_dimensions}; "
-        "core_facts=covered; others use covered+verbatim refs or not_applicable+rationale. Every "
-        "covered document_ref must be an exact substring of that primary H2, including Markdown "
-        "markers when present; a matching phrase in another H2 does not count. "
-        "For a revision, the revised cycle owns nonempty findings, changes, and target_section_ids; "
-        "cycle 2 is passed with empty findings/changes. For LOW_INFORMATION_DENSITY, keep "
-        "content_density_baseline.json; use exactly its validator-selected substantive targets and required minimum gains. "
-        "No document/section character maximum; include all evidence-backed conditions, risks, impacts, and actions. "
-        "Appendices/filler do not count. Preserve exact audit/review document_refs "
-        "with additive edits. "
-        "Do not patch review_cycles for this warning; content_freeze writes deterministic revised/pass cycles "
-        "after the gains pass. Structural validity "
-        "alone is not a quality pass.\n"
+        "  visual_evidence_plan{status,rationale,items[{snapshot_path,section_id,purpose,reader_value}]}; "
+        "embedded=3-5 core images; limited only if <3; Markdown order, <=2/H2, no adjacent "
+        "full-width images, with content after the last.\n"
+        "  Style: meeting_minutes uses writing_style=meeting_minutes_objective; capture agenda, "
+        "discussion, decisions, owners/deadlines, follow-ups/risks, not dialogue. Korean endings: "
+        "~함, ~하기로 함, ~예정임, ~필요함. Other types use "
+        "writing_style=content_adaptive.\n"
+        "  Front matter is reader metadata, not a production log: require date/duration; optional "
+        "purpose/participants; forbid language/evidence-policy, model/skill/token, "
+        "preprocess/render/QA, hashes, and internal paths.\n"
+        "- content_audit.json: schema_version=1,status=passed; missing_item_ids,qualifier_changes,"
+        "silent_conflicts,rewritten_by_external_source_item_ids are empty; covered_item_ids includes "
+        "every required item. coverage/conflict_coverage bind IDs to unique verbatim minutes refs; "
+        "recording_fidelity preserves recording content.\n"
+        "Do not expose raw STT/OCR/Snapshot refs anywhere. Omit internal "
+        "artifacts/paths/hashes, model/tool/token use, preprocessing, render attempts, or QA mechanics; "
+        "use natural image captions.\n"
+        f"- content_quality_review.json: schema_version=3,status=passed; review_cycles starts with "
+        f"one clean pass; final_checks exactly {model_final_checks}, each passed+finding. "
+        "required_item_checks uses item_id,section_id,dimensions; never `checks`, inventory_item_id, "
+        f"or primary_section_id. dimensions exactly {required_item_dimensions}; core_facts=covered; "
+        "others covered+verbatim ref or N/A+rationale. Each covered ref is an exact substring of that "
+        "primary H2. For repair, the revised cycle owns nonempty findings, changes, and "
+        "target_section_ids; cycle 2 is a clean pass. LOW_INFORMATION_DENSITY keeps "
+        "content_density_baseline.json and its validator-selected substantive targets/minimum gains. "
+        "No character maximum; use additive edits preserving refs. Do not patch review_cycles; "
+        "content_freeze writes deterministic revised/pass cycles. Structural validity alone is not a quality pass.\n"
         "- Auto checks unresolved public support/version/release/EOL/policy/security/API claims; a "
         "presenter estimate is no exemption. N/A official_sources: schema_version=1,status=not_applicable,"
         "current offset checked_at (not future),policy=official_only,appendix_heading,reason,claims:[],"
-        "privacy:{raw_transcript_or_ocr_sent:false}; final external section repeats reason/date/disclosures.\n\n"
+        "privacy:{raw_transcript_or_ocr_sent:false}; final section gives reason/date and "
+        "non-transmission without pipeline details.\n\n"
         "Complete only content artifacts. Do not delete, move, recreate, or hash raw frames/Snapshots; "
         "validators own frame accounting. Preserve useful Snapshots and verify all Markdown Snapshot "
         "refs resolve. Do not treat raw Snapshot count as the evidence-coverage gate. Follow "
@@ -1450,6 +1454,14 @@ def build_translation_prompt(
 ) -> str:
     target_label = target_language_label(target_language)
     metadata_value = "한국어" if target_label == "Korean" else "English"
+    meeting_style_contract = (
+        "If the document is meeting minutes, use concise objective Korean report style with "
+        "consistent endings such as ~함, ~하기로 함, ~예정임, and ~필요함; summarize rather "
+        "than recreate dialogue. "
+        if target_label == "Korean"
+        else "If the document is meeting minutes, keep a concise objective minutes voice and "
+        "summarize rather than recreate dialogue. "
+    )
     return (
         f"Translate the complete Markdown document below into natural professional {target_label}.\n"
         "Return only the translated Markdown as the final response: no preamble, no code fence, "
@@ -1457,8 +1469,10 @@ def build_translation_prompt(
         "Preserve the exact Markdown structure and order: heading levels, tables and cell counts, "
         "list types, checklist states, image paths, link URLs, inline-code literals, evidence "
         "references, timestamps, numeric values, units, product names, acronyms, and code. Translate "
-        "the title, headings, prose, table labels/cells, captions, and metadata labels naturally. "
-        f"Set the output-language metadata value to {metadata_value}. When present, render the final "
+        "the title, headings, prose, table labels/cells, captions, and reader metadata labels naturally. "
+        f"{meeting_style_contract}Do not add source/output-language, model, skill, token, preprocessing, "
+        "rendering, QA, hash, internal-path, or other production metadata. If a legacy source already "
+        f"contains an Output language/출력 언어 line, translate its value to {metadata_value}. When present, render the final "
         f"trust headings exactly as `## {'추가 검증이 필요한 항목' if target_label == 'Korean' else 'Items Requiring Further Verification'}` "
         f"then `## {'외부 근거 확인' if target_label == 'Korean' else 'External Evidence Check'}`. "
         "Do not summarize, omit, add, "

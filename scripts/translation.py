@@ -13,7 +13,10 @@ if __package__ in {None, ""}:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from scripts.content_freeze import validate_content_freeze
-from scripts.content_quality import TRUST_SECTION_HEADINGS
+from scripts.content_quality import (
+    TRUST_SECTION_HEADINGS,
+    korean_meeting_report_style_issues,
+)
 from scripts.document_language import language_policy_from_status, normalize_language
 from scripts.utils import now_local, read_json, write_json
 
@@ -106,6 +109,7 @@ def validate_translation_text(
     target: str,
     *,
     target_language: str,
+    writing_style: str | None = None,
 ) -> dict[str, Any]:
     issues: list[str] = []
     if not target.strip():
@@ -149,6 +153,8 @@ def validate_translation_text(
         issues.append("Korean target contains no Hangul")
     if normalized == "en" and not re.search(r"[A-Za-z]", target):
         issues.append("English target contains no Latin text")
+    if normalized == "ko" and writing_style == "meeting_minutes_objective":
+        issues.extend(korean_meeting_report_style_issues(target))
     source_h2s = H2_HEADING_PATTERN.findall(source)
     target_h2s = H2_HEADING_PATTERN.findall(target)
     source_trust_roles = [
@@ -180,6 +186,7 @@ def validate_translation_text(
         "structure_preserved": True,
         "protected_literals_preserved": True,
         "target_language_metadata": "passed",
+        "document_voice": "passed",
         "model_review_cycles": 0,
         "source_signature": source_signature,
         "target_signature": target_signature,
@@ -201,10 +208,13 @@ def create_translation_manifest(job_dir: Path) -> dict[str, Any]:
         raise FileNotFoundError(target_path)
     source = source_path.read_text(encoding="utf-8")
     target = target_path.read_text(encoding="utf-8")
+    blueprint = read_json(job_dir / "document_blueprint.json")
+    writing_style = str(blueprint.get("writing_style", "")).strip() or None
     checks = validate_translation_text(
         source,
         target,
         target_language=str(policy["output_language"]),
+        writing_style=writing_style,
     )
     result = {
         "schema_version": SCHEMA_VERSION,
@@ -212,6 +222,7 @@ def create_translation_manifest(job_dir: Path) -> dict[str, Any]:
         "created_at": now_local().isoformat(),
         "source_language": normalize_language(policy["detected_language"]),
         "target_language": normalize_language(policy["output_language"]),
+        "writing_style": writing_style,
         "content_freeze_sha256": str(freeze["content_sha256"]),
         "source": file_record(source_path),
         "target": file_record(target_path),
@@ -238,6 +249,10 @@ def validate_translation_manifest(job_dir: Path) -> dict[str, Any]:
         issues.append("translation source language does not match job policy")
     if manifest.get("target_language") != normalize_language(policy["output_language"]):
         issues.append("translation target language does not match job policy")
+    blueprint = read_json(job_dir / "document_blueprint.json")
+    writing_style = str(blueprint.get("writing_style", "")).strip() or None
+    if manifest.get("writing_style") != writing_style:
+        issues.append("translation writing style does not match document blueprint")
     if manifest.get("content_freeze_sha256") != freeze.get("content_sha256"):
         issues.append("translation source freeze hash does not match")
 
@@ -257,6 +272,7 @@ def validate_translation_manifest(job_dir: Path) -> dict[str, Any]:
                 source_path.read_text(encoding="utf-8"),
                 target_path.read_text(encoding="utf-8"),
                 target_language=str(policy["output_language"]),
+                writing_style=writing_style,
             )
         except ValueError as exc:
             issues.append(str(exc))
